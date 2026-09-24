@@ -1,0 +1,1207 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Fast engine startup — experiments</title>
+<style>
+.viz-root {
+  color-scheme: light;
+  --surface-0: #f5f4f1;
+  --surface-1: #fcfcfb;
+  --surface-2: #f0efec;
+  --text-primary: #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted: #8a8984;
+  --grid: #e6e5e1;
+  --axis: #c9c8c2;
+  --border: #e6e5e1;
+  --series-1: #2a78d6; --series-2: #eb6834; --series-3: #1baf7a; --series-4: #eda100; --series-5: #e87ba4;
+  --good: #0ca30c; --good-text: #006300;
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) .viz-root {
+    color-scheme: dark;
+    --surface-0: #111110; --surface-1: #1a1a19; --surface-2: #262624;
+    --text-primary: #ffffff; --text-secondary: #c3c2b7; --text-muted: #8f8e86;
+    --grid: #2e2e2c; --axis: #4a4a46; --border: #2e2e2c;
+    --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500; --series-5: #d55181;
+    --good-text: #3fc23f;
+  }
+}
+:root[data-theme="dark"] .viz-root {
+  color-scheme: dark;
+  --surface-0: #111110; --surface-1: #1a1a19; --surface-2: #262624;
+  --text-primary: #ffffff; --text-secondary: #c3c2b7; --text-muted: #8f8e86;
+  --grid: #2e2e2c; --axis: #4a4a46; --border: #2e2e2c;
+  --series-1: #3987e5; --series-2: #d95926; --series-3: #199e70; --series-4: #c98500; --series-5: #d55181;
+  --good-text: #3fc23f;
+}
+* { box-sizing: border-box; }
+body { margin: 0; }
+.viz-root {
+  min-height: 100vh; background: var(--surface-0); color: var(--text-primary);
+  font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Helvetica, Arial, sans-serif;
+  padding: 24px 28px 48px;
+}
+header h1 { font-size: 20px; margin: 0 0 2px; font-weight: 650; }
+header p { margin: 0 0 18px; color: var(--text-secondary); }
+.filters { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin-bottom: 18px; }
+.filters label { color: var(--text-secondary); font-size: 13px; display: flex; gap: 6px; align-items: center; }
+select, button {
+  font: inherit; color: var(--text-primary); background: var(--surface-1);
+  border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; cursor: pointer;
+}
+button:hover, select:hover { background: var(--surface-2); }
+.spacer { flex: 1; }
+.meta { color: var(--text-muted); font-size: 12px; }
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; margin-bottom: 16px; }
+.kpi { background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; }
+.kpi .v { font-size: 28px; font-weight: 650; letter-spacing: -0.01em; font-variant-numeric: tabular-nums; }
+.kpi .v small { font-size: 15px; font-weight: 500; color: var(--text-secondary); margin-left: 2px; }
+.kpi .l { color: var(--text-secondary); font-size: 13px; }
+.kpi .d { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+.kpi .d.good { color: var(--good-text); }
+.grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 16px; }
+.card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px; min-width: 0; }
+.span-4 { grid-column: span 4; } .span-5 { grid-column: span 5; } .span-7 { grid-column: span 7; }
+.span-8 { grid-column: span 8; } .span-12 { grid-column: span 12; } .span-6 { grid-column: span 6; }
+@media (max-width: 1100px) { .card { grid-column: span 12 !important; } }
+.card-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 4px; }
+.card h2 { font-size: 15px; margin: 0; font-weight: 620; }
+.card .sub { color: var(--text-secondary); font-size: 12.5px; margin: 0 0 10px; }
+.card-head .toggle { margin-left: auto; font-size: 12px; padding: 3px 8px; }
+svg text { fill: var(--text-secondary); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+svg .ink { fill: var(--text-primary); }
+svg .muted { fill: var(--text-muted); }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: 8px; font-size: 12.5px; color: var(--text-secondary); }
+.legend .item { display: flex; align-items: center; gap: 6px; }
+.legend .sw { width: 10px; height: 10px; border-radius: 3px; flex: none; }
+.legend .ln { width: 14px; height: 2px; border-radius: 1px; flex: none; }
+.legend .val { color: var(--text-primary); font-variant-numeric: tabular-nums; font-weight: 600; }
+table { border-collapse: collapse; width: 100%; font-size: 12.5px; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+th { color: var(--text-secondary); font-weight: 600; }
+td.num, th.num { text-align: right; }
+tr.sel td { background: var(--surface-2); }
+tbody tr { cursor: default; }
+.scroll { max-height: 340px; overflow: auto; }
+pre.log { margin: 0; font: 11.5px/1.5 ui-monospace, Menlo, monospace; white-space: pre-wrap; word-break: break-all; color: var(--text-secondary); }
+pre.log b { color: var(--text-primary); font-weight: 600; }
+.row-inline { display: flex; gap: 10px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
+input[type=search] { font: inherit; background: var(--surface-1); color: var(--text-primary); border: 1px solid var(--border); border-radius: 8px; padding: 5px 9px; width: 220px; }
+a { color: var(--series-1); }
+.tip {
+  position: fixed; pointer-events: none; z-index: 10; background: var(--surface-1); color: var(--text-primary);
+  border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 12px;
+  box-shadow: 0 4px 16px rgba(0,0,0,.12); min-width: 140px; display: none;
+}
+.tip .t { color: var(--text-secondary); margin-bottom: 4px; }
+.tip .r { display: flex; align-items: center; gap: 8px; }
+.tip .r .k { width: 12px; height: 2px; border-radius: 1px; flex: none; }
+.tip .r .n { color: var(--text-secondary); }
+.tip .r .v { font-weight: 650; font-variant-numeric: tabular-nums; }
+.hit { cursor: default; }
+.hit:hover, .hit:focus { filter: brightness(1.12); outline: none; }
+.dim { opacity: .5; transition: opacity .15s; }
+.empty { color: var(--text-muted); padding: 30px; text-align: center; }
+.tabs { display: flex; gap: 4px; margin: 0 0 18px; border-bottom: 1px solid var(--border); }
+.tabs button { border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none; padding: 8px 14px;
+  color: var(--text-secondary); font-weight: 560; }
+.tabs button[aria-selected="true"] { color: var(--text-primary); border-bottom-color: var(--text-primary); }
+.tabs button:hover { background: var(--surface-2); }
+[hidden] { display: none !important; }
+.notes { color: var(--text-secondary); font-size: 13px; margin: 0; padding-left: 18px; }
+.notes li { margin: 3px 0; }
+.notes b { color: var(--text-primary); }
+.status { display: inline-flex; gap: 5px; align-items: center; font-weight: 600; }
+.status.ok { color: var(--good-text); } .status.warn { color: var(--text-secondary); }
+code { font: 11.5px ui-monospace, Menlo, monospace; background: var(--surface-2); padding: 1px 5px; border-radius: 5px; }
+.diagram text { font-size: 12px; }
+.diagram .box { fill: var(--surface-2); stroke: var(--axis); stroke-width: 1; }
+.diagram .box.strong { fill: var(--surface-1); stroke: var(--text-secondary); stroke-width: 1.5; }
+.diagram .title { fill: var(--text-primary); font-weight: 650; font-size: 13px; }
+.diagram .edge { stroke: var(--text-muted); stroke-width: 1.5; fill: none; }
+.diagram .edge-label { fill: var(--text-muted); font-size: 11px; }
+/* control-plane top bar (copied from viz.css so this page's own styles stay as they are) */
+.viz-root.console { padding: 0; background: var(--surface-0); }
+.appbar { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 28px; padding: 0 28px; height: 56px;
+  background: var(--surface-1); border-bottom: 1px solid var(--border); }
+.brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.brand .logo { width: 26px; height: 26px; border-radius: 7px; background: var(--text-primary); color: var(--surface-1);
+  display: grid; place-items: center; font-weight: 700; font-size: 13px; flex: none; }
+.brand .product { font-weight: 650; font-size: 14px; line-height: 1.1; }
+.brand .env { font-size: 11.5px; color: var(--text-muted); line-height: 1.2; }
+.topnav { display: flex; gap: 2px; height: 100%; }
+.topnav a { display: flex; align-items: center; padding: 0 12px; color: var(--text-secondary); text-decoration: none; font-weight: 560;
+  font-size: 13.5px; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+.topnav a:hover { color: var(--text-primary); }
+.topnav a[aria-current="page"] { color: var(--text-primary); border-bottom-color: var(--text-primary); }
+.appbar-right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+.page { width: 80%; margin: 0 auto; padding: 22px 0 48px; display: flex; flex-direction: column; gap: 16px; }
+.appbar { padding: 0 10%; }  /* header content lines up with the 80%-wide page */
+@media (max-width: 1100px) { .page { width: auto; padding: 18px 20px 40px; } .appbar { padding: 0 20px; } }
+.viz-root.console > .analysis { padding: 24px 10% 48px; }
+.appbar .topnav a { border-bottom: 2px solid transparent; }
+</style>
+</head>
+<body>
+<div class="viz-root console" id="app">
+  <header class="appbar">
+    <div class="brand"><span class="logo">FS</span><div><div class="product">Fast Engine Startup</div><div class="env">Control plane · Modal · SGLang v0.5.20</div></div></div>
+    <nav class="topnav">
+      <a href="/">Engines</a>
+      <a href="/jobs">Jobs</a>
+      <a href="/playground">Playground</a>
+      <a href="/catalog">Catalog</a>
+      <a href="/compare">Compare</a>
+      <a href="/analysis" aria-current="page">Analysis</a>
+    </nav>
+  </header>
+  <div class="analysis">
+  <header>
+    <h1>Fast engine startup — experiments</h1>
+    <p id="subtitle">Loading…</p>
+  </header>
+
+  <nav class="tabs" role="tablist">
+    <button role="tab" data-tab="experiments" aria-selected="true">Experiments</button>
+    <button role="tab" data-tab="bench" aria-selected="false">Benchmark</button>
+    <button role="tab" data-tab="arch" aria-selected="false">Architecture</button>
+  </nav>
+
+  <section id="tab-bench" hidden>
+    <section class="kpis" id="benchKpis"></section>
+    <div class="grid">
+      <div class="card span-12">
+        <div class="card-head"><h2>Report: startup vs serving, by approach</h2><button class="toggle" data-table="tradeoff">Table</button></div>
+        <p class="sub">One point per approach: median of its cold-start trials, with a line spanning the fastest to slowest start. Left: serving throughput at concurrency 32 (higher is better). Right: per-token latency for a single request (lower is better). Down-and-left on the left panel, or up-and-left on the right, means faster to start but worse to serve.</p>
+        <div id="tradeoff"></div>
+      </div>
+      <div class="card span-12">
+        <div class="card-head"><h2>Approach report</h2></div>
+        <p class="sub">Medians over each approach's trials (range in brackets). Serving is measured right after startup; correctness compares greedy output of 3 fixed prompts with the baseline.</p>
+        <div id="approachTable"></div>
+      </div>
+      <div class="card span-7">
+        <div class="card-head"><h2>Findings</h2></div>
+        <ul class="notes" id="reportNotes"></ul>
+      </div>
+      <div class="card span-5">
+        <div class="card-head"><h2>How serving is measured</h2></div>
+        <p class="sub">Runs right after the engine is ready, inside the same sandbox against <code>localhost</code>, so network latency to the client is excluded (<code>serving_load()</code> in <code>bench_runner.py</code>).</p>
+        <ul class="notes">
+          <li><b>Workload:</b> ~800-word prompt (~1,000 tokens), prefixed with the request number so no two requests share a cached prefix; exactly 256 output tokens (greedy, <code>ignore_eos</code>); streaming <code>/generate</code>.</li>
+          <li><b>Concurrency 32:</b> 128 requests, 32 in flight at a time: throughput-bound.</li>
+          <li><b>Concurrency 1:</b> 16 requests, one after another: latency-bound, where CUDA graphs matter most.</li>
+          <li><b>TTFT:</b> request sent → first streamed chunk.</li>
+          <li><b>ITL (per-token latency):</b> per request, (total − TTFT) ÷ (tokens − 1); p50/p99 across requests.</li>
+          <li><b>Throughput:</b> all output tokens ÷ wall time of the whole batch.</li>
+          <li><b>Correctness:</b> greedy output of 3 fixed prompts, hashed, compared with the baseline.</li>
+          <li><b>Limits:</b> ITL is a per-request average (stalls inside a request are smoothed); a simple Python client, not SGLang's <code>bench_serving</code>, so compare approaches within this project rather than with published numbers; measures serving just after startup, not long steady state.</li>
+        </ul>
+      </div>
+      <div class="card span-12">
+        <div class="card-head"><h2>Cold-start trials by approach</h2><button class="toggle" data-table="dots">Table</button></div>
+        <p class="sub">One fresh sandbox per trial. Each dot is one trial; the tick is the median. Same rows across panels, so a change in one phase can be read against the total.</p>
+        <div id="dots"></div>
+      </div>
+      <div class="card span-7">
+        <div class="card-head"><h2>Serving quality after startup</h2></div>
+        <p class="sub">Streaming load right after ready: 128 requests at concurrency 32, 800-word prompts, 256 output tokens. Correctness compares greedy output of 3 fixed prompts against the baseline.</p>
+        <div id="serving"></div>
+      </div>
+      <div class="card span-5">
+        <div class="card-head"><h2>What the trials say so far</h2></div>
+        <ul class="notes" id="benchNotes"></ul>
+      </div>
+    </div>
+  </section>
+
+  <section id="tab-arch" hidden>
+    <div class="grid">
+      <div class="card span-12">
+        <div class="card-head"><h2>Architecture: artifact catalog, scheduler, workers</h2></div>
+        <p class="sub">Startup is treated as assembling artifacts. The scheduler reads the catalog, prepares on CPU what it can, claims GPUs late, and learns its estimates from every launch. Live numbers below come from the catalog in Postgres and <code>results/scheduler/</code>.</p>
+        <div id="diagram"></div>
+      </div>
+      <div class="card span-12">
+        <div class="card-head"><h2>Scheduler: predicted vs actual, against the original experiment</h2><button class="toggle" data-table="pred">Table</button></div>
+        <p class="sub">Each start's plan (predicted) against what the engine reported (actual), split by the same step categories.</p>
+        <div id="pred"></div>
+      </div>
+      <div class="card span-6">
+        <div class="card-head"><h2>Learned timings</h2></div>
+        <p class="sub">Priors from the vanilla baseline, refined by an EWMA after each launch.</p>
+        <div id="stats"></div>
+      </div>
+      <div class="card span-6">
+        <div class="card-head"><h2>Artifact catalog</h2></div>
+        <p class="sub">Content-addressed keys. The compile key hashes SGLang version, GPU, TP and the model's config.json, not the weights, so a new revision of the same architecture reuses it. Validated = an engine served traffic with it.</p>
+        <div id="artifacts"></div>
+      </div>
+      <div class="card span-12">
+        <div class="card-head"><h2>Engines</h2></div>
+        <p class="sub">Registered by the scheduler; removed on stop.</p>
+        <div id="engines"></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="tab-experiments">
+  <div class="filters">
+    <label>Experiment <select id="runSel"></select></label>
+    <label>Launch <select id="launchSel"></select></label>
+    <span class="spacer"></span>
+    <span class="meta" id="meta"></span>
+    <button id="reload" title="Re-read ./results">Reload</button>
+    <button id="theme" title="Toggle light/dark">Theme: auto</button>
+  </div>
+
+  <section class="kpis" id="kpis"></section>
+
+  <div class="grid">
+    <div class="card span-5">
+      <div class="card-head"><h2>Where the startup time goes</h2><button class="toggle" data-table="donut">Table</button></div>
+      <p class="sub" id="donutSub"></p>
+      <div id="donut"></div>
+    </div>
+    <div class="card span-7">
+      <div class="card-head"><h2>Cold vs warm, by phase group</h2><button class="toggle" data-table="compare">Table</button></div>
+      <p class="sub">Seconds per phase group for every launch in this experiment. The gap is what caching alone recovers.</p>
+      <div id="compare"></div>
+    </div>
+
+    <div class="card span-12">
+      <div class="card-head"><h2>Startup timeline</h2><button class="toggle" data-table="gantt">Table</button></div>
+      <p class="sub">Each launch from process spawn to first request served. Hover a segment for its phase and duration.</p>
+      <div id="gantt"></div>
+    </div>
+
+    <div class="card span-12">
+      <div class="card-head"><h2>GPU activity across the experiment</h2></div>
+      <p class="sub" id="gpuSub">nvidia-smi sampled every 0.5 s. Shaded bands are launches. Seconds since the container started.</p>
+      <div id="gpuUtil"></div>
+      <div id="gpuMem"></div>
+      <div class="legend" id="gpuLegend"></div>
+    </div>
+
+    <div class="card span-12">
+      <div class="card-head"><h2>All experiments</h2><button class="toggle" data-table="all">Table</button></div>
+      <p class="sub">Every launch across every saved experiment, stacked by phase group. Click a row to open it.</p>
+      <div id="all"></div>
+    </div>
+
+    <div class="card span-8">
+      <div class="card-head"><h2>Key log lines</h2></div>
+      <div class="row-inline">
+        <input type="search" id="logFilter" placeholder="Filter lines…">
+        <a id="rawLog" href="#" target="_blank" rel="noopener">Open full raw log</a>
+      </div>
+      <div class="scroll"><pre class="log" id="log"></pre></div>
+    </div>
+    <div class="card span-4">
+      <div class="card-head"><h2>Environment</h2></div>
+      <div id="env"></div>
+      <h2 style="font-size:14px;margin:16px 0 6px">Cache dirs after first launch</h2>
+      <p class="sub">Candidates for persisting compile artifacts across containers.</p>
+      <div class="scroll" style="max-height:220px" id="cache"></div>
+    </div>
+  </div>
+  </section>
+  </div>
+  <div class="tip" id="tip" role="status" aria-live="polite"></div>
+</div>
+
+<script>
+"use strict";
+const NS = "http://www.w3.org/2000/svg";
+const $ = (id) => document.getElementById(id);
+const css = (v) => getComputedStyle($("app")).getPropertyValue(v).trim();
+const SERIES = ["--series-1", "--series-2", "--series-3", "--series-4", "--series-5"];
+const color = (i) => css(SERIES[i % SERIES.length]);
+const fmt = (s, d = 1) => (s == null || isNaN(s) ? "—" : Number(s).toFixed(d));
+const state = { runs: [], run: null, launch: 0, tables: {} };
+
+function el(tag, attrs = {}, parent) {
+  const e = document.createElementNS(NS, tag);
+  for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
+  if (parent) parent.appendChild(e);
+  return e;
+}
+function h(tag, attrs = {}, text) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
+  if (text != null) e.textContent = text;
+  return e;
+}
+function text(parent, x, y, str, attrs = {}) {
+  const t = el("text", { x, y, ...attrs }, parent);
+  t.textContent = str;
+  return t;
+}
+function niceTicks(max, n = 5) {
+  if (max <= 0) return [0];
+  const raw = max / n, mag = 10 ** Math.floor(Math.log10(raw));
+  const step = [1, 2, 2.5, 5, 10].map((m) => m * mag).find((s) => s >= raw);
+  const out = [];
+  for (let v = 0; v <= max + 1e-9; v += step) out.push(+v.toFixed(6));
+  if (out[out.length - 1] < max) out.push(+(out[out.length - 1] + step).toFixed(6));  // axis always covers the data
+  return out;
+}
+function roundedBar(parent, x, y, w, hgt, fill, { left = true, right = true, r = 4 } = {}) {
+  // 4px rounded data-ends; square where a segment touches its neighbor.
+  r = Math.min(r, w / 2, hgt / 2);
+  const rl = left ? r : 0, rr = right ? r : 0;
+  const d = `M${x + rl},${y} H${x + w - rr} ${rr ? `A${rr},${rr} 0 0 1 ${x + w},${y + rr}` : ""} V${y + hgt - rr}
+    ${rr ? `A${rr},${rr} 0 0 1 ${x + w - rr},${y + hgt}` : ""} H${x + rl} ${rl ? `A${rl},${rl} 0 0 1 ${x},${y + hgt - rl}` : ""}
+    V${y + rl} ${rl ? `A${rl},${rl} 0 0 1 ${x + rl},${y}` : ""} Z`;
+  return el("path", { d, fill }, parent);
+}
+
+// ---------- tooltip ----------
+const tip = $("tip");
+function showTip(evt, title, rows) {
+  tip.replaceChildren();
+  tip.appendChild(h("div", { class: "t" }, title));
+  for (const r of rows) {
+    const row = h("div", { class: "r" });
+    if (r.color) { const k = h("span", { class: "k" }); k.style.background = r.color; row.appendChild(k); }
+    row.appendChild(h("span", { class: "v" }, r.value));
+    if (r.name) row.appendChild(h("span", { class: "n" }, r.name));
+    tip.appendChild(row);
+  }
+  tip.style.display = "block";
+  const pad = 14, bw = tip.offsetWidth, bh = tip.offsetHeight;
+  let x = (evt.clientX ?? 0) + pad, y = (evt.clientY ?? 0) + pad;
+  if (evt.type === "focus") { const b = evt.target.getBoundingClientRect(); x = b.right + pad; y = b.top; }
+  if (x + bw > innerWidth - 8) x = (evt.clientX ?? innerWidth) - bw - pad;
+  if (y + bh > innerHeight - 8) y = innerHeight - bh - 8;
+  tip.style.left = x + "px"; tip.style.top = y + "px";
+}
+const hideTip = () => (tip.style.display = "none");
+function hover(node, fn) {
+  node.classList.add("hit");
+  node.setAttribute("tabindex", "0");
+  const on = (e) => { const [t, rows] = fn(); showTip(e, t, rows); };
+  node.addEventListener("pointermove", on);
+  node.addEventListener("focus", on);
+  node.addEventListener("pointerleave", hideTip);
+  node.addEventListener("blur", hideTip);
+}
+
+// ---------- table-view toggle ----------
+function mount(id, drawChart, drawTable) {
+  const host = $(id);
+  host.replaceChildren();
+  if (state.tables[id]) host.appendChild(drawTable()); else drawChart(host);
+}
+function table(headers, rows, numCols = []) {
+  const t = h("table"), thead = h("thead"), tr = h("tr");
+  headers.forEach((c, i) => tr.appendChild(h("th", numCols.includes(i) ? { class: "num" } : {}, c)));
+  thead.appendChild(tr); t.appendChild(thead);
+  const tb = h("tbody");
+  for (const r of rows) {
+    const row = h("tr");
+    r.forEach((c, i) => row.appendChild(h("td", numCols.includes(i) ? { class: "num" } : {}, c)));
+    tb.appendChild(row);
+  }
+  t.appendChild(tb);
+  return t;
+}
+document.querySelectorAll(".toggle").forEach((b) =>
+  b.addEventListener("click", () => {
+    const k = b.dataset.table;
+    state.tables[k] = !state.tables[k];
+    b.textContent = state.tables[k] ? "Chart" : "Table";
+    render();
+  })
+);
+
+// ---------- data ----------
+async function loadRuns() {
+  state.runs = await (await fetch("/api/runs")).json();
+  const sel = $("runSel");
+  const keep = state.run?.run_id;
+  sel.replaceChildren();
+  for (const r of state.runs) {
+    const o = h("option", { value: r.run_id }, `${r.run_id}${r.extra_args ? "  [" + r.extra_args + "]" : "  [vanilla]"}`);
+    sel.appendChild(o);
+  }
+  if (!state.runs.length) {
+    $("subtitle").textContent = "No experiments in ./results yet. Run: uv run fes-bench -a baseline";
+    return;
+  }
+  await selectRun(keep && state.runs.some((r) => r.run_id === keep) ? keep : state.runs[0].run_id);
+}
+async function selectRun(id) {
+  document.querySelectorAll(".card").forEach((c) => c.classList.add("dim"));
+  state.run = await (await fetch(`/api/run/${id}`)).json();
+  document.querySelectorAll(".card").forEach((c) => c.classList.remove("dim"));
+  $("runSel").value = id;
+  const ls = $("launchSel");
+  ls.replaceChildren();
+  state.run.launches.forEach((l, i) => ls.appendChild(h("option", { value: i }, `Run ${l.run} (${l.label})`)));
+  state.launch = Math.min(state.launch, state.run.launches.length - 1);
+  ls.value = state.launch;
+  render();
+}
+$("runSel").addEventListener("change", (e) => selectRun(e.target.value));
+$("launchSel").addEventListener("change", (e) => { state.launch = +e.target.value; render(); });
+$("reload").addEventListener("click", loadRuns);
+$("logFilter").addEventListener("input", renderLog);
+
+// ---------- theme ----------
+const themes = ["auto", "light", "dark"];
+let themeIdx = 0;
+$("theme").addEventListener("click", () => {
+  themeIdx = (themeIdx + 1) % 3;
+  const t = themes[themeIdx];
+  if (t === "auto") document.documentElement.removeAttribute("data-theme");
+  else document.documentElement.setAttribute("data-theme", t);
+  $("theme").textContent = "Theme: " + t;
+  render();
+});
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => render());
+
+// ---------- render ----------
+function render() {
+  const run = state.run;
+  if (!run) return;
+  const L = run.launches[state.launch];
+  $("subtitle").textContent =
+    `${run.model} · TP=${run.tp} · ${run.gpu_count}× ${run.gpu.split(",")[0]} · SGLang ${run.sglang}` +
+    (run.extra_args ? ` · flags: ${run.extra_args}` : " · vanilla flags");
+  $("meta").textContent = `${state.runs.length} experiment${state.runs.length === 1 ? "" : "s"} in ./results`;
+  renderKpis(run, L);
+  renderDonut(run, L);
+  renderCompare(run);
+  renderGantt(run);
+  renderGpu(run);
+  renderAll();
+  renderLog();
+  renderEnv(run);
+}
+
+function kpi(value, unit, label, detail, good) {
+  const d = h("div", { class: "kpi" });
+  const v = h("div", { class: "v" }, value);
+  if (unit) v.appendChild(h("small", {}, unit));
+  d.append(v, h("div", { class: "l" }, label));
+  if (detail) d.appendChild(h("div", { class: "d" + (good ? " good" : "") }, detail));
+  return d;
+}
+function renderKpis(run, L) {
+  const box = $("kpis");
+  box.replaceChildren();
+  const cold = run.launches[0], warm = run.launches[run.launches.length - 1];
+  const gb = (L.weight_gb_per_gpu || 0) * run.tp;
+  const busy = L.gpu_busy || {};
+  box.append(
+    kpi(fmt(L.ready_s), "s", `Spawn → first request (${L.label})`,
+        run.container_start_s != null && L.run === 1 ? `+ ${fmt(run.container_start_s)} s container start` : "reused container"),
+    kpi(fmt(L.load_s), "s", "Weight load",
+        gb && L.load_s ? `${fmt(gb, 1)} GB at ${fmt(gb / L.load_s, 2)} GB/s` : ""),
+    kpi(fmt(L.groups[3]), "s", "CUDA graph capture",
+        L.prefill_graph_sizes ? `${L.prefill_graph_sizes} prefill + ${L.decode_graph_sizes} decode sizes` : ""),
+    kpi(busy.window_s ? fmt((100 * busy.active_s) / busy.window_s, 0) : "—", "%", "GPU active while reserved",
+        busy.window_s ? `${fmt(busy.active_s, 0)} s with kernels of ${fmt(busy.window_s, 0)} s (GPU 0)` : ""),
+    run.launches.length > 1
+      ? kpi(fmt(cold.ready_s - warm.ready_s), "s", "Recovered by warm caches",
+            `${fmt((100 * (cold.ready_s - warm.ready_s)) / cold.ready_s, 0)}% of cold startup`, true)
+      : kpi("—", "", "Recovered by warm caches", "needs ≥2 launches"),
+  );
+}
+
+function renderDonut(run, L) {
+  const total = L.groups.reduce((a, b) => a + b, 0);
+  $("donutSub").textContent = `Run ${L.run} (${L.label}): share of ${fmt(total)} s from spawn to first request, in five phase groups.`;
+  mount("donut", (host) => {
+    const W = 500, H = 250, cx = 125, cy = 125, R = 110, r = 70;
+    const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, width: "100%", role: "img",
+      "aria-label": "Donut chart of startup time by phase group" }, host);
+    let a0 = -Math.PI / 2;
+    const surface = css("--surface-1");
+    L.groups.forEach((v, i) => {
+      if (v <= 0) return;
+      const a1 = a0 + (v / total) * Math.PI * 2;
+      const large = a1 - a0 > Math.PI ? 1 : 0;
+      const p = (rad, ang) => [cx + rad * Math.cos(ang), cy + rad * Math.sin(ang)];
+      const [x0, y0] = p(R, a0), [x1, y1] = p(R, a1), [x2, y2] = p(r, a1), [x3, y3] = p(r, a0);
+      const path = el("path", {
+        d: `M${x0},${y0} A${R},${R} 0 ${large} 1 ${x1},${y1} L${x2},${y2} A${r},${r} 0 ${large} 0 ${x3},${y3} Z`,
+        fill: color(i), stroke: surface, "stroke-width": 2, "stroke-linejoin": "round",
+      }, svg);
+      hover(path, () => [run.groups[i], [{ value: `${fmt(v)} s`, name: `${fmt((100 * v) / total, 0)}% of startup`, color: color(i) }]]);
+      a0 = a1;
+    });
+    text(svg, cx, cy - 4, `${fmt(total, 0)} s`, { "text-anchor": "middle", class: "ink", "font-size": 26, "font-weight": 650 });
+    text(svg, cx, cy + 16, L.label === "cold" ? "cold start" : L.label.startsWith("group") ? `${L.label} · cold` : "warm start", { "text-anchor": "middle", class: "muted", "font-size": 12 });
+    // legend doubles as direct labels: swatch, name, value, share
+    L.groups.forEach((v, i) => {
+      const y = 38 + i * 38;
+      roundedBar(svg, 262, y - 9, 10, 10, color(i), { r: 3 });
+      text(svg, 280, y, run.groups[i], { class: "ink", "font-size": 12 });
+      text(svg, 280, y + 16, `${fmt(v)} s · ${fmt((100 * v) / total, 0)}%`, { "font-size": 12 });
+    });
+  }, () => table(["Phase group", "Seconds", "Share"],
+      L.groups.map((v, i) => [run.groups[i], fmt(v), fmt((100 * v) / total, 0) + "%"]), [1, 2]));
+}
+
+function renderCompare(run) {
+  const Ls = run.launches;
+  mount("compare", (host) => {
+    const W = 680, rowH = 18, gapIn = 4, gapOut = 16, left = 230, right = 56;
+    const H = 20 + run.groups.length * (Ls.length * (rowH + gapIn) + gapOut) + 20;
+    const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, width: "100%", role: "img", "aria-label": "Cold vs warm by phase group" }, host);
+    const max = Math.max(...Ls.flatMap((l) => l.groups));
+    const ticks = niceTicks(max, 4), xmax = ticks[ticks.length - 1];
+    const x = (v) => left + (v / xmax) * (W - left - right);
+    const plotBottom = H - 20;
+    for (const t of ticks) {
+      el("line", { x1: x(t), x2: x(t), y1: 10, y2: plotBottom, stroke: css("--grid") }, svg);
+      text(svg, x(t), H - 4, `${t}s`, { "text-anchor": "middle" });
+    }
+    let y = 18;
+    run.groups.forEach((g, gi) => {
+      const blockH = Ls.length * (rowH + gapIn) - gapIn;
+      text(svg, left - 10, y + blockH / 2 + 4, g, { "text-anchor": "end", class: "ink", "font-size": 12 });
+      Ls.forEach((l, li) => {
+        const v = l.groups[gi];
+        const bar = roundedBar(svg, left, y, Math.max(x(v) - left, 1), rowH, color(gi), { left: false });
+        if (li > 0) bar.setAttribute("fill-opacity", 0.42);
+        hover(bar, () => [g, Ls.map((o) => ({ value: `${fmt(o.groups[gi])} s`, name: `run ${o.run} (${o.label})`, color: color(gi) }))]);
+        text(svg, x(v) + 6, y + rowH / 2 + 4, `${fmt(v)}s`, { class: li === 0 ? "ink" : "" });
+        y += rowH + gapIn;
+      });
+      y += gapOut - gapIn;
+    });
+    el("line", { x1: left, x2: left, y1: 10, y2: plotBottom, stroke: css("--axis") }, svg);
+    const leg = h("div", { class: "legend" });
+    Ls.forEach((l, li) => {
+      const it = h("span", { class: "item" }), sw = h("span", { class: "sw" });
+      sw.style.background = css("--text-secondary"); sw.style.opacity = li === 0 ? 1 : 0.42;
+      it.append(sw, h("span", {}, `Run ${l.run} (${l.label})`), h("span", { class: "val" }, ` ${fmt(l.ready_s)} s total`));
+      leg.appendChild(it);
+    });
+    host.appendChild(leg);
+  }, () => table(["Phase group", ...Ls.map((l) => `Run ${l.run} (${l.label}) s`), ...(Ls.length > 1 ? ["Δ s"] : [])],
+      run.groups.map((g, i) => [g, ...Ls.map((l) => fmt(l.groups[i])),
+        ...(Ls.length > 1 ? [fmt(Ls[0].groups[i] - Ls[Ls.length - 1].groups[i])] : [])]),
+      Ls.map((_, i) => i + 1).concat(Ls.length > 1 ? [Ls.length + 1] : [])));
+}
+
+function renderGantt(run) {
+  const Ls = run.launches;
+  mount("gantt", (host) => {
+    const W = 1200, left = 120, right = 70, rowH = 26, rowGap = 22, top = 10;
+    const H = top + Ls.length * (rowH + rowGap) + 26;
+    const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, width: "100%", role: "img", "aria-label": "Startup timeline per launch" }, host);
+    const max = Math.max(...Ls.map((l) => l.ready_s));
+    const ticks = niceTicks(max, 8), xmax = ticks[ticks.length - 1];
+    const x = (v) => left + (v / xmax) * (W - left - right);
+    for (const t of ticks) {
+      el("line", { x1: x(t), x2: x(t), y1: top, y2: H - 24, stroke: css("--grid") }, svg);
+      text(svg, x(t), H - 8, `${t}s`, { "text-anchor": "middle" });
+    }
+    Ls.forEach((l, li) => {
+      const y = top + li * (rowH + rowGap) + 8;
+      text(svg, left - 12, y + rowH / 2 + 4, `Run ${l.run} (${l.label})`, { "text-anchor": "end", class: "ink", "font-size": 12.5 });
+      const segs = l.segments;
+      segs.forEach((s, si) => {
+        const x0 = x(s.start), w = Math.max(x(s.end) - x0 - 2, 0.8);
+        const bar = roundedBar(svg, x0, y, w, rowH, color(s.group), { left: si === 0, right: si === segs.length - 1 });
+        hover(bar, () => [s.name, [
+          { value: `${fmt(s.end - s.start)} s`, name: run.groups[s.group], color: color(s.group) },
+          { value: `${fmt(s.start)}–${fmt(s.end)} s`, name: "from spawn" },
+        ]]);
+        // label inside the fill: white or ink by the fill's luminance
+        if (w > 46) text(svg, x0 + w / 2, y + rowH / 2 + 4, `${fmt(s.end - s.start, 0)}s`, { "text-anchor": "middle", "font-size": 11 })
+          .style.fill = s.group <= 1 ? "#ffffff" : "#0b0b0b";
+      });
+      text(svg, x(l.ready_s) + 8, y + rowH / 2 + 5, `${fmt(l.ready_s)} s`, { class: "ink", "font-weight": 650, "font-size": 13 });
+    });
+    const leg = h("div", { class: "legend" });
+    run.groups.forEach((g, i) => {
+      const it = h("span", { class: "item" }), sw = h("span", { class: "sw" });
+      sw.style.background = color(i); it.append(sw, h("span", {}, g)); leg.appendChild(it);
+    });
+    host.appendChild(leg);
+  }, () => table(["Launch", "Segment", "Group", "Start s", "End s", "Duration s"],
+      Ls.flatMap((l) => l.segments.map((s) => [`Run ${l.run} (${l.label})`, s.name, run.groups[s.group],
+        fmt(s.start), fmt(s.end), fmt(s.end - s.start)])), [3, 4, 5]));
+}
+
+function renderGpu(run) {
+  const gpus = Object.keys(run.gpu_series).sort();
+  const hostU = $("gpuUtil"), hostM = $("gpuMem");
+  hostU.replaceChildren(); hostM.replaceChildren(); $("gpuLegend").replaceChildren();
+  if (!gpus.length) { hostU.appendChild(h("div", { class: "empty" }, "No GPU samples for this experiment.")); return; }
+  const all = run.gpu_series[gpus[0]].t;
+  const tmin = Math.max(0, all[0]), tmax = all[all.length - 1];
+  const panels = [
+    { host: hostU, key: "util", label: "GPU util (%)", max: 100, unit: "%", fixed: [0, 25, 50, 75, 100] },
+    { host: hostM, key: "mem_gb", label: "GPU memory (GB)", max: 80, unit: " GB", fixed: [0, 20, 40, 60, 80] },
+  ];
+  const W = 1200, left = 60, right = 20;
+  const x = (t) => left + ((t - tmin) / (tmax - tmin)) * (W - left - right);
+  const lineColor = (gi) => color(gi);
+  const svgs = [];
+  panels.forEach((P, pi) => {
+    const H = pi === 0 ? 200 : 186, top = pi === 0 ? 40 : 24, bottom = pi === 0 ? 10 : 26;
+    const y = (v) => top + (1 - v / P.max) * (H - top - bottom);
+    const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, width: "100%", role: "img", "aria-label": P.label }, P.host);
+    svgs.push({ svg, H, top, bottom, y, P });
+    run.launches.forEach((l) => {
+      const a = x(l.launch_offset_s), b = x(l.launch_offset_s + l.ready_s);
+      el("rect", { x: a, y: top, width: Math.max(b - a, 1), height: H - top - bottom, fill: css("--surface-2") }, svg);
+      if (pi === 0) text(svg, (a + b) / 2, 30, `run ${l.run} (${l.label}) · ${fmt(l.ready_s, 0)} s`, { "text-anchor": "middle", "font-size": 11.5 });
+    });
+    for (const v of P.fixed) {
+      el("line", { x1: left, x2: W - right, y1: y(v), y2: y(v), stroke: css("--grid") }, svg);
+      text(svg, left - 8, y(v) + 4, v, { "text-anchor": "end" });
+    }
+    text(svg, left, top - (pi === 0 ? 26 : 10), P.label, { class: "ink", "font-size": 12 });
+    if (pi === 1) {
+      for (const t of niceTicks(tmax, 10)) {
+        if (t < tmin) continue;
+        text(svg, x(t), H - 8, `${t}s`, { "text-anchor": "middle" });
+      }
+    }
+    gpus.forEach((g, gi) => {
+      const s = run.gpu_series[g];
+      const pts = s.t.map((t, i) => `${x(t).toFixed(1)},${y(s[P.key][i]).toFixed(1)}`).join(" ");
+      el("polyline", { points: pts, fill: "none", stroke: lineColor(gi), "stroke-width": 2, "stroke-linejoin": "round",
+        "stroke-opacity": gi === 0 ? 1 : 0.85 }, svg);
+    });
+  });
+  // shared crosshair across both panels
+  const s0 = run.gpu_series[gpus[0]];
+  const cross = svgs.map(({ svg, H, top, bottom }) =>
+    el("line", { y1: top, y2: H - bottom, stroke: css("--text-muted"), "stroke-width": 1, visibility: "hidden" }, svg));
+  svgs.forEach(({ svg, H }) => {
+    const hit = el("rect", { x: left, y: 0, width: W - left - right, height: H, fill: "transparent" }, svg);
+    hit.addEventListener("pointermove", (e) => {
+      const b = svg.getBoundingClientRect();
+      const t = tmin + ((e.clientX - b.left) * (W / b.width) - left) / (W - left - right) * (tmax - tmin);
+      let i = 0, best = Infinity;
+      s0.t.forEach((tt, k) => { const d = Math.abs(tt - t); if (d < best) { best = d; i = k; } });
+      const X = x(s0.t[i]);
+      cross.forEach((c) => { c.setAttribute("x1", X); c.setAttribute("x2", X); c.setAttribute("visibility", "visible"); });
+      const inLaunch = run.launches.find((l) => s0.t[i] >= l.launch_offset_s && s0.t[i] <= l.launch_offset_s + l.ready_s);
+      let phase = "";
+      if (inLaunch) {
+        const rel = s0.t[i] - inLaunch.launch_offset_s;
+        const seg = inLaunch.segments.find((sg) => rel >= sg.start && rel <= sg.end);
+        phase = ` · run ${inLaunch.run} ${seg ? seg.name : ""} (+${fmt(rel)} s)`;
+      }
+      showTip(e, `t = ${fmt(s0.t[i])} s${phase}`, gpus.flatMap((g, gi) => {
+        const s = run.gpu_series[g];
+        return [{ value: `${s.util[i] ?? "—"}% · ${fmt(s.mem_gb[i])} GB`, name: `GPU ${g}`, color: lineColor(gi) }];
+      }));
+    });
+    hit.addEventListener("pointerleave", () => { hideTip(); cross.forEach((c) => c.setAttribute("visibility", "hidden")); });
+  });
+  gpus.forEach((g, gi) => {
+    const it = h("span", { class: "item" }), ln = h("span", { class: "ln" });
+    ln.style.background = lineColor(gi); it.append(ln, h("span", {}, `GPU ${g}`));
+    $("gpuLegend").appendChild(it);
+  });
+}
+
+function renderAll() {
+  const rows = state.runs.flatMap((r) => r.launches.map((l) => ({ r, l })));
+  mount("all", (host) => {
+    if (!rows.length) return host.appendChild(h("div", { class: "empty" }, "No experiments yet."));
+    const W = 1200, left = 330, right = 70, rowH = 16, gap = 10, top = 6;
+    const H = top + rows.length * (rowH + gap) + 24;
+    const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, width: "100%", role: "img", "aria-label": "All launches by phase group" }, host);
+    const max = Math.max(...rows.map(({ l }) => l.ready_s));
+    const ticks = niceTicks(max, 8), xmax = ticks[ticks.length - 1];
+    const x = (v) => left + (v / xmax) * (W - left - right);
+    for (const t of ticks) {
+      el("line", { x1: x(t), x2: x(t), y1: top, y2: H - 22, stroke: css("--grid") }, svg);
+      text(svg, x(t), H - 6, `${t}s`, { "text-anchor": "middle" });
+    }
+    rows.forEach(({ r, l }, i) => {
+      const y = top + i * (rowH + gap);
+      const selected = state.run && r.run_id === state.run.run_id && l.run === state.run.launches[state.launch].run;
+      if (selected) el("rect", { x: 0, y: y - 4, width: W, height: rowH + 8, rx: 6, fill: css("--surface-2") }, svg);
+      const lbl = text(svg, left - 12, y + rowH / 2 + 4,
+        `${r.run_id} · run ${l.run} (${l.label})${r.extra_args ? " · " + r.extra_args : ""}`,
+        { "text-anchor": "end", class: "ink", "font-size": 12 });
+      lbl.style.cursor = "pointer";
+      lbl.addEventListener("click", () => { state.launch = l.run - 1; selectRun(r.run_id); });
+      let x0 = 0;
+      const nz = l.groups.map((v, gi) => [v, gi]).filter(([v]) => v > 0);
+      nz.forEach(([v, gi], k) => {
+        const bx = x(x0), w = Math.max(x(x0 + v) - bx - 2, 0.8);
+        const bar = roundedBar(svg, bx, y, w, rowH, color(gi), { left: k === 0, right: k === nz.length - 1 });
+        hover(bar, () => [`${r.run_id} · run ${l.run} (${l.label})`, [{ value: `${fmt(v)} s`, name: state.run.groups[gi], color: color(gi) },
+          { value: `${fmt(l.ready_s)} s`, name: "total to first request" }]]);
+        bar.addEventListener("click", () => { state.launch = l.run - 1; selectRun(r.run_id); });
+        x0 += v;
+      });
+      text(svg, x(l.ready_s) + 8, y + rowH / 2 + 4, `${fmt(l.ready_s)} s`, { class: "ink", "font-weight": 600 });
+    });
+  }, () => table(["Experiment", "Flags", "Launch", "Ready s", "Weight load s", ...state.run.groups.map((g) => g.split(" (")[0] + " s")],
+      rows.map(({ r, l }) => [r.run_id, r.extra_args || "vanilla", `run ${l.run} (${l.label})`, fmt(l.ready_s), fmt(l.load_s), ...l.groups.map((v) => fmt(v))]),
+      [3, 4, 5, 6, 7, 8, 9]));
+}
+
+function renderLog() {
+  const run = state.run;
+  if (!run) return;
+  const L = run.launches[state.launch];
+  $("rawLog").href = `/api/run/${run.run_id}/log/${L.run}`;
+  const q = $("logFilter").value.toLowerCase();
+  const pre = $("log");
+  pre.replaceChildren();
+  const lines = L.key_lines.filter((k) => !q || k.line.toLowerCase().includes(q));
+  if (!lines.length) { pre.textContent = "No matching lines."; return; }
+  for (const k of lines) {
+    const b = document.createElement("b");
+    b.textContent = k.t.toFixed(1).padStart(7) + "s  ";
+    pre.append(b, document.createTextNode(k.line + "\n"));
+  }
+}
+
+function renderEnv(run) {
+  const L = run.launches[0];
+  const rows = [
+    ["Experiment", run.run_id],
+    ["Model", run.model],
+    ["Tensor parallel", String(run.tp)],
+    ["GPU", `${run.gpu_count}× ${run.gpu}`],
+    ["SGLang", run.sglang],
+    ["Extra flags", run.extra_args || "none (vanilla)"],
+    ["Weights per GPU", L.weight_gb_per_gpu ? `${fmt(L.weight_gb_per_gpu, 2)} GB` : "—"],
+    ["KV cache tokens", L.kv_tokens ? L.kv_tokens.toLocaleString() : "—"],
+    ["Container start", run.container_start_s != null ? `${fmt(run.container_start_s)} s` : "—"],
+  ];
+  const t = h("table"), tb = h("tbody");
+  rows.forEach(([k, v]) => { const tr = h("tr"); tr.append(h("th", {}, k), h("td", {}, v)); tb.appendChild(tr); });
+  t.appendChild(tb);
+  $("env").replaceChildren(t);
+  const cache = Object.entries(run.cache_dirs || {});
+  $("cache").replaceChildren(cache.length ? table(["Size", "Path"], cache.map(([p, s]) => [s, p]))
+    : h("div", { class: "empty" }, "Not recorded."));
+}
+
+// ================================================================ tabs
+state.tab = "experiments";
+state.arch = null;
+document.querySelectorAll(".tabs button").forEach((b) =>
+  b.addEventListener("click", () => {
+    state.tab = b.dataset.tab;
+    history.replaceState(null, "", "#" + state.tab);
+    document.querySelectorAll(".tabs button").forEach((x) => x.setAttribute("aria-selected", String(x === b)));
+    for (const t of ["experiments", "bench", "arch"]) $("tab-" + t).hidden = t !== state.tab;
+    renderTab();
+  })
+);
+async function renderTab() {
+  if (state.tab === "bench") renderBench();
+  if (state.tab === "arch") {
+    state.arch = await (await fetch("/api/architecture")).json();
+    renderArch();
+  }
+}
+const median = (xs) => { const a = [...xs].sort((x, y) => x - y); const m = a.length >> 1; return a.length % 2 ? a[m] : (a[m - 1] + a[m]) / 2; };
+function statusEl(ok, okText, badText) {
+  const sp = h("span", { class: "status " + (ok ? "ok" : "warn") });
+  sp.textContent = (ok ? "✓ " : "≠ ") + (ok ? okText : badText);
+  return sp;
+}
+
+// ================================================================ benchmark
+function benchTrials() {
+  return state.runs.filter((r) => r.bench).map((r) => ({ run_id: r.run_id, container_start_s: r.container_start_s, ...r.bench,
+    graph_s: (r.bench.prefill_graph_s || 0) + (r.bench.decode_graph_s || 0) }));
+}
+function approachOrder(trials) {
+  const seen = [...new Set(trials.map((t) => t.approach))];
+  return seen.sort((a, b) => (a === "baseline" ? -1 : b === "baseline" ? 1 : a.localeCompare(b)));
+}
+function renderBench() {
+  renderReport();
+  const T = benchTrials();
+  const box = $("benchKpis");
+  box.replaceChildren();
+  if (!T.length) {
+    box.appendChild(kpi("0", "", "Benchmark trials", "Run: uv run fes-bench"));
+    ["dots", "serving"].forEach((id) => $(id).replaceChildren(h("div", { class: "empty" }, "No sandbox trials yet.")));
+    return;
+  }
+  const A = approachOrder(T);
+  const by = (a) => T.filter((t) => t.approach === a);
+  const base = by("baseline"), jit = by("jit_cache");
+  const baseHash = base[0]?.correctness_hash;
+  const matches = T.filter((t) => t.correctness_hash === baseHash).length;
+  const loads = T.map((t) => t.load_s).filter((x) => x > 0);
+  const best = T.reduce((a, b) => (a.ready_s < b.ready_s ? a : b));
+  box.append(
+    kpi(String(T.length), "", "Cold-start trials", `${A.length} approach${A.length === 1 ? "" : "es"} · 1 fresh sandbox each`),
+    base.length && jit.length
+      ? kpi(fmt(median(base.map((t) => t.graph_s)) - median(jit.map((t) => t.graph_s))), "s", "Graph capture saved by compile cache",
+          `median ${fmt(median(base.map((t) => t.graph_s)))} → ${fmt(median(jit.map((t) => t.graph_s)))} s`, true)
+      : kpi("—", "", "Graph capture saved by compile cache", "needs baseline + jit_cache trials"),
+    kpi(`${fmt(Math.min(...loads), 0)}–${fmt(Math.max(...loads), 0)}`, "s", "Weight-load spread (same 61 GB)",
+        `${fmt(Math.max(...loads) / Math.min(...loads), 1)}× between trials: volume bandwidth varies`),
+    kpi(`${matches}/${T.length}`, "", "Output matches baseline", baseHash ? `greedy hash ${baseHash}` : "no baseline trial", matches === T.length),
+    kpi(fmt(best.ready_s), "s", "Fastest spawn → ready", `${best.approach} rep ${best.rep}`),
+  );
+
+  mount("dots", (host) => {
+    const panels = [
+      { key: "ready_s", title: "Spawn → first request" },
+      { key: "load_s", title: "Weight load" },
+      { key: "graph_s", title: "CUDA graph capture (prefill + decode)" },
+    ];
+    const W = 1200, left = 130, gapP = 36, rowH = 34, top = 30;
+    const H = top + A.length * rowH + 30;
+    const pw = (W - left - gapP * (panels.length - 1) - 10) / panels.length;
+    const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, width: "100%", role: "img", "aria-label": "Trials by approach" }, host);
+    A.forEach((a, i) => text(svg, left - 12, top + i * rowH + rowH / 2 + 4, a, { "text-anchor": "end", class: "ink", "font-size": 12.5 }));
+    panels.forEach((P, pi) => {
+      const x0 = left + pi * (pw + gapP);
+      const vals = T.map((t) => t[P.key]).filter((v) => v != null);
+      const ticks = niceTicks(Math.max(...vals, 1), 4), xmax = ticks[ticks.length - 1];
+      const x = (v) => x0 + (v / xmax) * pw;
+      text(svg, x0, 16, P.title, { class: "ink", "font-size": 12, "font-weight": 600 });
+      for (const t of ticks) {
+        el("line", { x1: x(t), x2: x(t), y1: top, y2: H - 24, stroke: css("--grid") }, svg);
+        text(svg, x(t), H - 8, `${t}s`, { "text-anchor": "middle" });
+      }
+      A.forEach((a, i) => {
+        const cy = top + i * rowH + rowH / 2;
+        el("line", { x1: x0, x2: x0 + pw, y1: cy, y2: cy, stroke: css("--grid"), "stroke-dasharray": "2 3" }, svg);
+        const pts = by(a).filter((t) => t[P.key] != null);
+        if (!pts.length) return;
+        const m = median(pts.map((t) => t[P.key]));
+        el("line", { x1: x(m), x2: x(m), y1: cy - 10, y2: cy + 10, stroke: css("--text-primary"), "stroke-width": 2, "stroke-linecap": "round" }, svg);
+        pts.forEach((t) => {
+          el("circle", { cx: x(t[P.key]), cy, r: 5.5, fill: color(0), stroke: css("--surface-1"), "stroke-width": 2 }, svg);
+          const hit = el("circle", { cx: x(t[P.key]), cy, r: 12, fill: "transparent" }, svg);
+          hover(hit, () => [`${a} · rep ${t.rep}`, [{ value: `${fmt(t[P.key])} s`, name: P.title, color: color(0) },
+            { value: t.run_id, name: "" }, ...(t.cache_hit ? [{ value: "compile cache hit", name: "" }] : [])]]);
+        });
+        if (pts.length > 1) text(svg, x(m) + 6, cy - 9, `med ${fmt(m)}`, { "font-size": 10.5 });
+      });
+    });
+  }, () => table(["Approach", "Rep", "Trial", "Ready s", "Weight load s", "Graph capture s", "Container s", "Cache"],
+      T.map((t) => [t.approach, String(t.rep), t.run_id, fmt(t.ready_s), fmt(t.load_s), fmt(t.graph_s),
+        fmt(t.container_start_s), t.cache_hit ? "hit" : t.cache_saved ? "written back" : "—"]), [1, 3, 4, 5, 6]));
+
+  const sv = $("serving");
+  const rows = T.filter((t) => t.serving);
+  if (!rows.length) sv.replaceChildren(h("div", { class: "empty" }, "No serving-load results."));
+  else {
+    const t = table(["Approach", "Rep", "tok/s", "TTFT p50", "TTFT p99", "ITL p50", "ITL p99", "Correctness"],
+      rows.map((r) => [r.approach, String(r.rep), fmt(r.serving.output_tok_per_s, 0), `${fmt(r.serving.ttft_p50_ms, 0)} ms`,
+        `${fmt(r.serving.ttft_p99_ms, 0)} ms`, `${fmt(r.serving.itl_p50_ms, 2)} ms`, `${fmt(r.serving.itl_p99_ms, 2)} ms`, ""]),
+      [1, 2, 3, 4, 5, 6]);
+    t.querySelectorAll("tbody tr").forEach((tr, i) => {
+      const td = tr.lastChild;
+      td.replaceChildren(statusEl(rows[i].correctness_hash === baseHash, "matches baseline", "differs from baseline"));
+    });
+    sv.replaceChildren(t);
+  }
+
+  const notes = $("benchNotes");
+  notes.replaceChildren();
+  const li = (html) => { const e = h("li"); html.forEach((p) => e.appendChild(typeof p === "string" ? document.createTextNode(p) : p)); notes.appendChild(e); };
+  const b = (t) => h("b", {}, t);
+  if (base.length && jit.length) li([b("Compile cache works. "), `Restoring ~29 MB of `, h("code", {}, "~/.cache/sglang/{triton,jit}"),
+    ` cuts graph capture from ${fmt(median(base.map((t) => t.graph_s)))} s to ${fmt(median(jit.map((t) => t.graph_s)))} s, with identical greedy output.`]);
+  if (loads.length > 1) li([b("Weight load dominates variance. "), `The same 61 GB took ${fmt(Math.min(...loads), 0)}–${fmt(Math.max(...loads), 0)} s from the volume, enough to hide the cache win in the totals. Pre-staging weights would cut both time and variance.`]);
+  const cmpRows = rows.filter((r) => r.approach === "baseline" || r.approach === "jit_cache");
+  if (cmpRows.length > 1) li([b("The compile cache doesn't change serving. "), `Baseline and jit_cache trials serve at ${fmt(Math.min(...cmpRows.map((r) => r.serving.output_tok_per_s)), 0)}–${fmt(Math.max(...cmpRows.map((r) => r.serving.output_tok_per_s)), 0)} tok/s at concurrency 32 (approaches that change CUDA graphs are in the report above).`]);
+  li([b("Also found: "), "each cold container compiles ~160 MB of Python bytecode (~8,200 .pyc files) under /opt/sglang and /sgl-workspace, a free image-level fix for import time."]);
+  li([b("Caveat: "), `n=${Math.max(...A.map((a) => by(a).length))} per approach so far; medians need ≥3 trials to be trusted.`]);
+}
+
+// ================================================================ benchmark report
+const APPROACH_DESC = {
+  baseline: "vanilla SGLang (stock image)", jit_cache: "compile cache restored", prefetch: "weight prefetch",
+  prefetch_jit: "cache + prefetch", prefetch_jit_pyc: "cache + prefetch + bytecode", bytecode: "bytecode only",
+  graphs_on: "current stack, CUDA graphs on", graphs_off: "current stack, CUDA graphs off",
+  graphs_small: "current stack, decode graphs ≤ bs 16", graphs_decode_only: "current stack, no prefill graphs",
+  graphs_pow2: "current stack, power-of-two graph sizes (9 decode + 12 prefill)",
+  mx_streamer: "ModelExpress ModelStreamer", lazy_imports: "current stack + lazy imports", text_only: "lazy imports, no vision packages",
+  runai_streamer: "Run:ai streamer", fastsafetensors: "fastsafetensors",
+};
+function approachStats(T) {
+  const out = {};
+  for (const a of approachOrder(T)) {
+    const rs = T.filter((t) => t.approach === a);
+    const pick = (f) => rs.map(f).filter((v) => v != null && !isNaN(v));
+    const med = (f) => { const v = pick(f); return v.length ? median(v) : null; };
+    const rng = (f) => { const v = pick(f); return v.length ? [Math.min(...v), Math.max(...v)] : null; };
+    const p0 = (t) => (t.serving_profiles || [])[0] || t.serving || {};
+    const p1 = (t) => (t.serving_profiles || [])[1] || {};
+    out[a] = { n: rs.length, ready: med((t) => t.ready_s), readyR: rng((t) => t.ready_s),
+      graph: med((t) => t.graph_s), load: med((t) => t.load_s),
+      tok32: med((t) => p0(t).output_tok_per_s), itl32: med((t) => p0(t).itl_p50_ms), ttft32: med((t) => p0(t).ttft_p50_ms),
+      tok1: med((t) => p1(t).output_tok_per_s), itl1: med((t) => p1(t).itl_p50_ms), ttft1: med((t) => p1(t).ttft_p50_ms),
+      hashes: [...new Set(rs.map((t) => t.correctness_hash))] };
+  }
+  return out;
+}
+function renderReport() {
+  const T = benchTrials();
+  if (!T.length) return;
+  const S2 = approachStats(T);
+  const A = Object.keys(S2);
+  const baseHash = T.find((t) => t.approach === "baseline")?.correctness_hash;
+
+  mount("tradeoff", (host) => {
+    const panels = [
+      { key: "tok32", title: "Throughput, concurrency 32 (tok/s) ↑", fmtv: (v) => fmt(v, 0) },
+      { key: "itl1", title: "Per-token latency, single request (ms) ↓", fmtv: (v) => fmt(v, 1) },
+    ];
+    const W = 1200, H = 380, gap = 60, left = 70, top = 34, bottom = 44;
+    const pw = (W - left - gap - 30) / 2;
+    const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, width: "100%", role: "img", "aria-label": "Startup vs serving trade-off" }, host);
+    const readyMax = Math.max(...A.map((a) => S2[a].readyR?.[1] ?? S2[a].ready ?? 0));
+    const xt = niceTicks(readyMax, 5), xmax = xt[xt.length - 1];
+    panels.forEach((P, pi) => {
+      const x0 = left + pi * (pw + gap);
+      const pts = A.filter((a) => S2[a][P.key] != null && S2[a].ready != null);
+      const yt = niceTicks(Math.max(...pts.map((a) => S2[a][P.key]), 1), 5), ymax = yt[yt.length - 1];
+      const x = (v) => x0 + (v / xmax) * pw, y = (v) => top + (1 - v / ymax) * (H - top - bottom);
+      text(svg, x0, 18, P.title, { class: "ink", "font-weight": 600, "font-size": 12.5 });
+      for (const t of yt) { el("line", { x1: x0, x2: x0 + pw, y1: y(t), y2: y(t), stroke: css("--grid") }, svg); text(svg, x0 - 8, y(t) + 4, P.fmtv(t), { "text-anchor": "end" }); }
+      for (const t of xt) text(svg, x(t), H - bottom + 18, `${t}s`, { "text-anchor": "middle" });
+      text(svg, x0 + pw / 2, H - 6, "startup: spawn → first request (s)", { "text-anchor": "middle", "font-size": 11.5 });
+      const placed = [];  // label boxes already drawn in this panel
+      pts.sort((p, q) => y(S2[p][P.key]) - y(S2[q][P.key])).forEach((a) => {
+        const st_ = S2[a], cx = x(st_.ready), cy = y(st_[P.key]);
+        let ly = cy - 8;
+        while (placed.some((q) => Math.abs(q.y - ly) < 14 && Math.abs(q.x - cx) < 110)) ly += 14;
+        placed.push({ x: cx, y: ly });
+        if (st_.readyR && st_.readyR[1] > st_.readyR[0])
+          el("line", { x1: x(st_.readyR[0]), x2: x(st_.readyR[1]), y1: cy, y2: cy, stroke: color(0), "stroke-width": 2, "stroke-opacity": 0.35 }, svg);
+        el("circle", { cx, cy, r: 6, fill: color(0), stroke: css("--surface-1"), "stroke-width": 2 }, svg);
+        const hit = el("circle", { cx, cy, r: 14, fill: "transparent" }, svg);
+        hover(hit, () => [a, [{ value: `${fmt(st_.ready)} s`, name: "startup (median)", color: color(0) },
+          { value: P.fmtv(st_[P.key]), name: P.title }, { value: `${st_.n}`, name: "trials" }]]);
+        const lab = text(svg, cx + 10, ly, a, { class: "ink", "font-size": 11.5 });
+        if (cx > x0 + pw - 110) { lab.setAttribute("text-anchor", "end"); lab.setAttribute("x", cx - 10); }
+      });
+    });
+  }, () => table(["Approach", "Trials", "Startup s", "Throughput c32 tok/s", "ITL c1 ms"],
+      A.map((a) => [a, String(S2[a].n), fmt(S2[a].ready), fmt(S2[a].tok32, 0), fmt(S2[a].itl1, 2)]), [1, 2, 3, 4]));
+
+  const rng = (r) => (r && r[1] > r[0] ? ` [${fmt(r[0], 0)}–${fmt(r[1], 0)}]` : "");
+  const t = table(["Approach", "What it is", "Trials", "Startup s", "Graph capture s", "Weight load s", "c32 tok/s", "c32 TTFT", "c32 ITL", "c1 tok/s", "c1 ITL", "Output"],
+    A.map((a) => { const x = S2[a]; return [a, APPROACH_DESC[a] || "", String(x.n), fmt(x.ready) + rng(x.readyR), fmt(x.graph), fmt(x.load),
+      fmt(x.tok32, 0), x.ttft32 != null ? `${fmt(x.ttft32, 0)} ms` : "—", x.itl32 != null ? `${fmt(x.itl32, 2)} ms` : "—",
+      fmt(x.tok1, 0), x.itl1 != null ? `${fmt(x.itl1, 2)} ms` : "—", ""]; }), [2, 3, 4, 5, 6, 7, 8, 9, 10]);
+  t.querySelectorAll("tbody tr").forEach((tr, i) => {
+    const hs = S2[A[i]].hashes;
+    tr.lastChild.replaceChildren(statusEl(baseHash && hs.length === 1 && hs[0] === baseHash, "matches baseline", baseHash ? "differs" : "no baseline"));
+  });
+  $("approachTable").replaceChildren(t);
+
+  const notes = $("reportNotes");
+  notes.replaceChildren();
+  const li = (parts) => { const e = h("li"); parts.forEach((p) => e.appendChild(typeof p === "string" ? document.createTextNode(p) : p)); notes.appendChild(e); };
+  const b = (x) => h("b", {}, x);
+  const on = S2.graphs_on, off = S2.graphs_off;
+  if (on && off && on.tok32 && off.tok32) {
+    li([b("CUDA graphs off is a bad trade for this model. "),
+      `It skips ~${fmt(on.graph, 0)} s of graph capture, but throughput at concurrency 32 drops ${fmt(on.tok32 / off.tok32, 0)}× (${fmt(on.tok32, 0)} → ${fmt(off.tok32, 0)} tok/s)`
+      + (on.itl1 && off.itl1 ? ` and single-request per-token latency is ${fmt(off.itl1 / on.itl1, 0)}× worse (${fmt(on.itl1, 1)} → ${fmt(off.itl1, 1)} ms)` : "")
+      + ". With 128 experts per MoE layer, eager decode is dominated by kernel-launch overhead that graphs remove."]);
+    li([b("Startup totals understate the capture saving. "),
+      `Median startup moved ${fmt(on.ready - off.ready, 1)} s (${fmt(on.ready, 1)} → ${fmt(off.ready, 1)} s) while capture itself was ~${fmt(on.graph, 0)} s: with 2 trials, host-to-host import variance moves the totals by similar amounts.`]);
+  }
+  for (const k of ["graphs_small", "graphs_decode_only", "graphs_pow2"]) {
+    const x = S2[k];
+    if (on && x && x.tok32) li([b(`${k}: `), `startup ${fmt(x.ready, 1)} s vs ${fmt(on.ready, 1)} s with full graphs; throughput ${fmt((100 * x.tok32) / on.tok32, 0)}% of full graphs`
+      + (x.itl1 && on.itl1 ? `, single-request latency ${fmt(x.itl1, 2)} ms vs ${fmt(on.itl1, 2)} ms` : "") + "."]);
+  }
+  const pw = S2.graphs_pow2;
+  if (pw && on && pw.tok32 && on.tok32) li([b("Power-of-two graph sizes are the scheduler default. "),
+    `Capturing 21 shapes instead of 94 cuts graph capture ${fmt(on.graph, 1)} → ${fmt(pw.graph, 1)} s and startup ${fmt(on.ready, 1)} → ${fmt(pw.ready, 1)} s (median), `
+    + `while throughput stays at ${fmt((100 * pw.tok32) / on.tok32, 0)}% of full graphs`
+    + (pw.itl1 && on.itl1 ? ` and single-request per-token latency moves ${fmt(on.itl1, 2)} → ${fmt(pw.itl1, 2)} ms` : "")
+    + `; output identical. SGLang pads each batch up to the next captured size, so every batch still runs on a graph.`]);
+  if (S2.mx_streamer && S2.jit_cache) li([b("ModelExpress ModelStreamer: "), `weight load ${fmt(S2.mx_streamer.load, 1)} s vs ${fmt(S2.jit_cache.load, 1)} s with SGLang's default loader (same compile cache, no prefetch).`]);
+  // Failed trials leave no summary, so known negative results are recorded here explicitly.
+  li([b("Text-only image (no torchvision/torchcodec) does not work: "), "import succeeds, but at server start SGLang's config registry "
+    + "registers multimodal image processors through transformers' AutoImageProcessor, which hard-requires torchvision (ImportError in both trials). Dropped."]);
+  if (S2.lazy_imports && on) li([b("Lazy imports: "), `served correctly (identical output). Startup ${fmt(S2.lazy_imports.ready, 1)} s vs ${fmt(on.ready, 1)} s, but those trials ran in a slow period `
+    + `(every phase slower, including jit_cache in the same window); the expected ~2 s is far below that noise, so the paired CPU measurement (0.52 s per import) is the evidence. Now in the engine image.`]);
+  const bases = S2.baseline, best = A.filter((a) => S2[a].tok32 && S2[a].ready).sort((p, q) => S2[p].ready - S2[q].ready);
+  if (bases && best.length) li([b("Fastest start that keeps full serving speed: "),
+    (() => { const ok = best.filter((a) => S2[a].tok32 >= 0.9 * (on?.tok32 || bases.tok32 || 0)); const a = ok[0]; return a ? `${a} at ${fmt(S2[a].ready, 1)} s median (baseline ${fmt(bases.ready, 1)} s).` : "none yet."; })()]);
+  li([b("Caveat: "), "medians over 2–4 trials; startup totals vary by tens of seconds between hosts, so phase times (graph capture, weight load) are the more reliable comparison."]);
+}
+
+// ================================================================ architecture
+const STAT_META = {
+  container_start_s: ["Container start", "s"], other_s: ["Imports, NCCL, init, warmup", "s"],
+  graph_s_miss: ["CUDA graphs, cache miss", "s"], graph_s_hit: ["CUDA graphs, cache hit", "s"],
+  volume_gbps: ["Volume → GPU weights", "GB/s"], hf_gbps: ["Hugging Face → volume", "GB/s"],
+  restore_gbps: ["Compile-cache restore", "GB/s"],
+};
+const STEP_CATS = ["Imports, NCCL, init, warmup", "", "Weights (load / download)", "CUDA graphs", "Container start + prep"];
+function stepCat(action) {
+  if (/imports/i.test(action)) return 0;
+  if (/weights/i.test(action)) return 2;
+  if (/graph/i.test(action)) return 3;
+  return 4;
+}
+function renderArch() {
+  const A = state.arch || {};
+  const cat = A.catalog || {}, arts = Object.values(cat.artifacts || {}), engines = cat.engines || {};
+  const stats = cat.stats || {}, runs = A.scheduler_runs || [];
+  const last = runs[runs.length - 1];
+
+  // ---- diagram
+  const host = $("diagram");
+  host.replaceChildren();
+  const W = 1200, H = 370;
+  const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, width: "100%", class: "diagram", role: "img", "aria-label": "Architecture diagram" }, host);
+  const defs = el("defs", {}, svg);
+  const mk = el("marker", { id: "arr", viewBox: "0 0 10 10", refX: 9, refY: 5, markerWidth: 7, markerHeight: 7, orient: "auto-start-reverse" }, defs);
+  el("path", { d: "M0,0 L10,5 L0,10 z", fill: css("--text-muted") }, mk);
+  const box = (x, y, w, hh, title, lines, strong) => {
+    el("rect", { x, y, width: w, height: hh, rx: 10, class: "box" + (strong ? " strong" : "") }, svg);
+    text(svg, x + 14, y + 24, title, { class: "title" });
+    lines.forEach((l, i) => text(svg, x + 14, y + 46 + i * 18, l));
+  };
+  const edge = (x1, y1, x2, y2, label, lx, ly, both) => {
+    el("path", { d: `M${x1},${y1} L${x2},${y2}`, class: "edge", "marker-end": "url(#arr)", ...(both ? { "marker-start": "url(#arr)" } : {}) }, svg);
+    if (label) text(svg, lx ?? (x1 + x2) / 2, ly ?? (y1 + y2) / 2 - 6, label, { class: "edge-label", "text-anchor": "middle" });
+  };
+  const nArts = arts.length, nVal = arts.filter((a) => a.locations.some((l) => l.validated)).length;
+  const w = arts.find((a) => a.kind === "weights"), c = arts.find((a) => a.kind === "compile");
+  box(20, 120, 140, 70, "Request", ["model, rev, TP, GPU"]);
+  box(220, 70, 250, 110, "Scheduler", ["local CLI · policy late_claim | asap",
+    last ? `last plan ${fmt(last.plan.predicted_ready_s, 0)} s → actual ${fmt((last.actual.startup_s ?? last.actual.request_to_ready_s), 0)} s` : "no starts yet",
+    `${runs.length} start${runs.length === 1 ? "" : "s"} logged`], true);
+  box(220, 225, 250, 90, "Artifact catalog", ["Postgres (Docker)",
+    `${nArts} artifacts · ${nVal} validated · ${Object.keys(engines).length} live engines`, `timings learned from ${stats.samples || 0} launch${stats.samples === 1 ? "" : "es"}`]);
+  box(540, 20, 270, 90, "Prep worker · CPU sandbox", ["weights: Hugging Face → volume", "runs before any GPU is claimed", "no GPU billed"]);
+  box(540, 150, 270, 120, "Engine worker · GPU sandbox", ["prefetch weights + restore kernels", "SGLang per GPU group", "write back caches (on miss)", "serves on encrypted tunnel URL"], true);
+  box(880, 20, 190, 250, "Modal volumes, per model", ["fes-models-<model>", w ? `  weights ${fmt(w.bytes / 1e9, 1)} GB` : "  (empty)", "", "fes-artifacts-<model>",
+    c ? `  compile cache ${fmt(c.bytes / 1e6, 0)} MB` : "  (none yet)", "", "fes-results", "  logs, GPU samples"]);
+  box(880, 292, 190, 58, "Client", ["HTTPS via tunnel URL"]);
+  edge(160, 155, 218, 140, "", 0, 0);
+  edge(345, 182, 345, 223, "read plan inputs / record results", 400, 205, true);
+  edge(470, 95, 538, 70, "1 · CPU prep", 492, 68);
+  edge(470, 150, 538, 190, "2 · GPU, late", 488, 196);
+  edge(810, 60, 878, 60, "write weights", 845, 52);
+  edge(812, 205, 878, 205, "read · write back", 845, 197, true);
+  edge(812, 255, 878, 318, "serve", 830, 300);
+  text(svg, 20, 362, "Sandboxes only report on stdout; only the control plane writes the catalog (no credentials in containers).", { class: "edge-label" });
+
+  // ---- predicted vs actual
+  mount("pred", (host2) => {
+    if (!runs.length) return host2.appendChild(h("div", { class: "empty" }, "No scheduler starts yet. Run: uv run python scheduler.py start"));
+    // Original experiment: vanilla launches (profiler run + baseline sandbox trials), cold only.
+    // Original = vanilla launches measured in fresh sandboxes, same harness as the current path.
+    const originals = state.runs.filter((r) => r.bench && r.bench.approach === "baseline").map((r) => {
+      const g = r.bench ? r.bench.groups : r.launches[0].groups;
+      const vals = [g[0] + g[1] + g[4], 0, g[2], g[3], r.container_start_s || 0];
+      return { label: `${r.run_id} · original`, vals, total: vals.reduce((a, b) => a + b, 0), original: true, id: r.run_id };
+    });
+    const origMedian = originals.length ? median(originals.map((o) => o.total)) : null;
+    const rowsData = [...originals, ...runs.flatMap((r) => {
+      const pred = [0, 0, 0, 0, 0];
+      r.plan.steps.forEach((st) => (pred[stepCat(st.action)] += st.est_s));
+      const a = r.actual, act = [0, 0, 0, 0, 0];
+      act[0] = a.other_s || 0; act[2] = (a.load_s || 0) + (a.prep?.seconds || 0); act[3] = a.graph_s || 0;
+      act[4] = Math.max(0, (a.startup_s ?? a.request_to_ready_s) - act[0] - act[2] - act[3]);
+      return [{ label: `${r.engine_id} · predicted`, vals: pred, total: r.plan.predicted_ready_s, r },
+              { label: `${r.engine_id} · actual`, vals: act, total: a.startup_s ?? a.request_to_ready_s, r, actual: true }];
+    })];
+    const W2 = 1200, left = 290, right = 330, rowH = 20, gap = 10, top = 6;
+    const H2 = top + rowsData.length * (rowH + gap) + runs.length * 8 + (originals.length ? 54 : 0) + 30;
+    const svg2 = el("svg", { viewBox: `0 0 ${W2} ${H2}`, width: "100%", role: "img", "aria-label": "Predicted vs actual" }, host2);
+    const max = Math.max(...rowsData.map((d) => d.total));
+    const ticks = niceTicks(max, 5), xmax = ticks[ticks.length - 1];
+    const x = (v) => left + (v / xmax) * (W2 - left - right);
+    for (const t of ticks) {
+      el("line", { x1: x(t), x2: x(t), y1: top, y2: H2 - 22, stroke: css("--grid") }, svg2);
+      text(svg2, x(t), H2 - 6, `${t}s`, { "text-anchor": "middle" });
+    }
+    let y = top;
+    if (originals.length) {
+      text(svg2, 4, y + 12, "Original experiment · vanilla SGLang, fresh sandbox per trial", { class: "ink", "font-weight": 650, "font-size": 12 });
+      y += 22;
+    }
+    rowsData.forEach((d, i) => {
+      if (!d.original && rowsData[i - 1]?.original) {
+        y += 10;
+        text(svg2, 4, y + 12, "Current · scheduler + catalog", { class: "ink", "font-weight": 650, "font-size": 12 });
+        y += 22;
+      }
+      text(svg2, left - 10, y + rowH / 2 + 4, d.original ? d.id : d.label.split(" · ")[1], { "text-anchor": "end", class: "ink", "font-size": d.original ? 11 : 12 });
+      if (!d.actual && !d.original) text(svg2, 4, y + rowH / 2 + 4, d.r.engine_id, { "font-size": 11, class: "muted" });
+      let x0 = 0;
+      const nz = [4, 0, 2, 3].filter((k) => d.vals[k] > 0);
+      nz.forEach((k, j) => {
+        const bx = x(x0), bw = Math.max(x(x0 + d.vals[k]) - bx - 2, 0.8);
+        const bar = roundedBar(svg2, bx, y, bw, rowH, color(k), { left: j === 0, right: j === nz.length - 1 });
+        if (!d.actual && !d.original) bar.setAttribute("fill-opacity", 0.45);
+        hover(bar, () => [d.label, [{ value: `${fmt(d.vals[k])} s`, name: STEP_CATS[k], color: color(k) }]]);
+        x0 += d.vals[k];
+      });
+      let lab = d.actual ? `${fmt(d.total)} s  (${d.r.error_s >= 0 ? "+" : ""}${fmt(d.r.error_s)} s)` : `${fmt(d.total)} s`;
+      if (d.actual && origMedian) lab += `  · ${fmt(origMedian - d.total, 0)} s faster than original median`;
+      text(svg2, x(d.total) + 8, y + rowH / 2 + 4, lab, { class: "ink", "font-weight": d.actual ? 650 : 400 });
+      y += rowH + gap + (d.actual ? 8 : 0);
+    });
+    if (origMedian) {
+      const ml = el("line", { x1: x(origMedian), x2: x(origMedian), y1: top, y2: y, stroke: css("--text-primary"), "stroke-width": 1.5, "stroke-dasharray": "4 3" });
+      svg2.insertBefore(ml, svg2.firstChild);  // under bars and labels
+      text(svg2, x(origMedian) + 4, top + 10, `original median ${fmt(origMedian, 0)} s`, { "font-size": 10.5 });
+    }
+    const leg = h("div", { class: "legend" });
+    [4, 0, 2, 3].forEach((k) => { const it = h("span", { class: "item" }), sw = h("span", { class: "sw" }); sw.style.background = color(k); it.append(sw, h("span", {}, STEP_CATS[k])); leg.appendChild(it); });
+    const it = h("span", { class: "item" }); it.appendChild(h("span", {}, "· light = predicted, solid = measured · dashed = original median")); leg.appendChild(it);
+    host2.appendChild(leg);
+  }, () => table(["Engine", "Policy", "Predicted s", "Actual s", "Error s", "GPU billed s", "Cache"],
+      runs.map((r) => [r.engine_id, r.request.policy, fmt(r.plan.predicted_ready_s), fmt(r.actual.startup_s ?? r.actual.request_to_ready_s), fmt(r.error_s),
+        fmt(r.actual.gpu_billed_to_ready_s), r.actual.cache?.hit ? "hit" : "miss"]), [2, 3, 4, 5]));
+
+  // ---- learned stats
+  const pri = A.priors || {};
+  $("stats").replaceChildren(table(["Estimate", "Prior", "Learned", "Change"],
+    Object.entries(STAT_META).map(([k, [name, unit]]) => {
+      const p0 = pri[k], v = stats[k];
+      const ch = p0 && v != null ? `${v >= p0 ? "+" : ""}${fmt((100 * (v - p0)) / p0, 0)}%` : "—";
+      return [name, `${fmt(p0, 2)} ${unit}`, v != null ? `${fmt(v, 2)} ${unit}` : "—", ch];
+    }), [1, 2, 3]));
+
+  // ---- artifacts
+  const at = table(["Kind", "Key", "Size", "Location", "Status"],
+    arts.map((a) => [a.kind, a.key, a.bytes > 1e9 ? `${fmt(a.bytes / 1e9, 1)} GB` : `${fmt(a.bytes / 1e6, 0)} MB`,
+      a.locations.map((l) => `${l.tier}: ${l.uri}`).join("\n"), ""]), [2]);
+  at.querySelectorAll("tbody tr").forEach((tr, i) =>
+    tr.lastChild.replaceChildren(statusEl(arts[i].locations.some((l) => l.validated), "validated", "not yet served")));
+  $("artifacts").replaceChildren(arts.length ? at : h("div", { class: "empty" }, "Empty. Run: uv run python scheduler.py reconcile"));
+
+  // ---- engines
+  const E = Object.entries(engines);
+  $("engines").replaceChildren(E.length
+    ? table(["Engine", "Model", "URL"], E.map(([id, e]) => [id, `${e.model.split("/")[1]} TP=${e.tp}`, e.url]))
+    : h("div", { class: "empty" }, "No engines running."));
+}
+
+const _render = render;
+render = function () { _render(); renderTab(); };
+$("reload").addEventListener("click", () => { if (state.tab !== "experiments") renderTab(); });
+
+loadRuns().then(() => {
+  const t = location.hash.slice(1);
+  const btn = document.querySelector(`.tabs button[data-tab="${t}"]`);
+  if (btn) btn.click();
+});
+</script>
+</body>
+</html>

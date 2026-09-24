@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Playground · control plane — fast engine startup</title>
+<link rel="stylesheet" href="/viz.css">
+<style>
+.field { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.field label { font-size: 11.5px; font-weight: 600; color: var(--text-secondary); }
+.field select, .field input { width: 100%; height: 34px; font: inherit; font-size: 13px; background: var(--surface-1); color: var(--text-primary);
+  border: 1px solid var(--border); border-radius: 8px; padding: 0 10px; }
+.play-controls { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) 120px 120px; gap: 12px; align-items: end; margin-bottom: 8px; }
+@media (max-width: 900px) { .play-controls { grid-template-columns: 1fr 1fr; } }
+.engine-meta { font-size: 12px; color: var(--text-muted); margin: 0 0 10px; min-height: 16px; }
+textarea#prompt { display: block; width: 100%; min-height: 110px; resize: vertical; font-family: inherit; font-size: 14px; line-height: 1.5;
+  background: var(--surface-1); color: var(--text-primary); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; }
+textarea#prompt:focus, .field select:focus, .field input:focus { outline: 2px solid color-mix(in srgb, var(--series-1) 45%, transparent); outline-offset: 0; }
+.send-row { display: flex; gap: 12px; align-items: center; margin-top: 10px; }
+.msg { font-size: 12.5px; color: var(--text-secondary); }
+.chat { display: flex; flex-direction: column; gap: 10px; margin-top: 16px; }
+.turn { border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; background: var(--surface-1); }
+.turn.user { background: var(--surface-0); }
+.turn.error { border-color: color-mix(in srgb, var(--critical-text) 45%, var(--border)); }
+.turn .who { font-size: 11px; color: var(--text-muted); margin-bottom: 5px; text-transform: uppercase; letter-spacing: .05em; font-weight: 600; }
+.turn .body { white-space: pre-wrap; word-break: break-word; font-size: 14px; line-height: 1.55; }
+.turn .stats { font-size: 11.5px; color: var(--text-muted); margin-top: 8px; font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+<div class="viz-root console" id="app">
+  <header class="appbar">
+    <div class="brand"><span class="logo">FS</span><div><div class="product">Fast Engine Startup</div><div class="env">Control plane · Modal · SGLang v0.5.20</div></div></div>
+    <nav class="topnav">
+      <a href="/">Engines</a>
+      <a href="/jobs">Jobs</a>
+      <a href="/playground" aria-current="page">Playground</a>
+      <a href="/catalog">Catalog</a>
+      <a href="/compare">Compare</a>
+      <a href="/analysis">Analysis</a>
+    </nav>
+    <div class="appbar-right"><span class="pill" id="engCount">…</span></div>
+  </header>
+  <main class="page">
+    <section class="panel">
+      <div class="panel-head"><div><h2>Playground</h2>
+        <p class="sub">Send prompts to a serving engine. Requests go through the control plane (engines have no CORS), so latency includes one extra hop.</p></div>
+        <div class="actions"><button id="tryClear" class="ghost sm">Clear conversation</button></div></div>
+      <div class="play-controls">
+        <div class="field"><label for="tryEngine">Engine</label><select id="tryEngine"><option value="">no engines serving</option></select></div>
+        <div class="field"><label for="tryMode">Mode</label><select id="tryMode">
+          <option value="chat" title="OpenAI-style /v1/chat/completions with the model's chat template">Chat (instruct)</option>
+          <option value="raw" title="SGLang /generate: continues the text as-is">Raw completion</option></select></div>
+        <div class="field"><label for="tryMax">Max tokens</label><input type="number" id="tryMax" value="256" min="1" max="4096"></div>
+        <div class="field"><label for="tryTemp">Temperature</label><input type="number" id="tryTemp" value="0.7" min="0" max="2" step="0.1"></div>
+      </div>
+      <div class="engine-meta" id="engineMeta"></div>
+      <textarea id="prompt" placeholder="Ask something… (⌘/Ctrl + Enter to send)"></textarea>
+      <div class="send-row"><button id="trySend" class="primary">Send</button><span class="msg" id="tryMsg"></span>
+        <a href="/" class="muted" style="margin-left:auto;font-size:12.5px" id="noEngineHint" hidden>No engine serving: launch one on the Engines page →</a></div>
+      <div class="chat" id="chat"></div>
+    </section>
+  </main>
+  <div class="tip" id="tip" role="status" aria-live="polite"></div>
+</div>
+<script src="/viz.js"></script>
+<script>
+"use strict";
+const shortModel = (m) => (m || "Qwen/Qwen3-30B-A3B-Instruct-2507").split("/").pop().replace("-Instruct-2507", "");
+async function api(path, body) {
+  const r = await fetch(path, body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const d = await r.json();
+  if (!r.ok) throw new Error(d.error || r.statusText);
+  return d;
+}
+let ENGINES = {};
+const wanted = new URLSearchParams(location.search).get("engine");
+async function loadEngines() {
+  ENGINES = await api("/api/engines");
+  const E = Object.entries(ENGINES);
+  fillEngineSelect(E);
+  if (wanted && ENGINES[wanted] && !loadEngines.done) { $("tryEngine").value = wanted; loadEngines.done = true; }
+  $("engCount").textContent = E.length ? `${E.length} engine${E.length > 1 ? "s" : ""} serving` : "No engines serving";
+  $("noEngineHint").hidden = E.length > 0;
+  showEngineMeta();
+}
+function showEngineMeta() {
+  const e = ENGINES[$("tryEngine").value];
+  if (!e) return ($("engineMeta").textContent = "");
+  const left = e.expires_at ? Math.max(0, e.expires_at - Date.now() / 1000) / 60 : null;
+  $("engineMeta").textContent = `${shortModel(e.model)} · TP=${e.tp} · ${e.gpu.replace("!", "")}` + (left != null ? ` · ${fmt(left, 0)} min of lifetime left` : "");
+}
+$("tryEngine").addEventListener("change", showEngineMeta);
+// ---------------------------------------------------------------- try the engine
+function fillEngineSelect(E) {
+  const sel = $("tryEngine"), keep = sel.value;
+  sel.replaceChildren();
+  if (!E.length) sel.appendChild(h("option", { value: "" }, "no engines serving"));
+  E.forEach(([id, e]) => sel.appendChild(h("option", { value: id }, `${id} · ${e.model.split("/")[1]} TP=${e.tp}`)));
+  if (E.some(([id]) => id === keep)) sel.value = keep;
+  $("trySend").disabled = !E.length;
+}
+function addTurn(kind, text, stats) {
+  const t = h("div", { class: "turn " + kind });
+  t.append(h("div", { class: "who" }, kind === "user" ? "You" : kind === "error" ? "Error" : "Engine"), h("div", { class: "body" }, text));
+  if (stats) t.appendChild(h("div", { class: "stats" }, stats));
+  $("chat").appendChild(t);
+  $("chat").scrollTop = $("chat").scrollHeight;
+  return t;
+}
+async function sendPrompt() {
+  const engine = $("tryEngine").value, prompt = $("prompt").value.trim();
+  if (!engine) return ($("tryMsg").textContent = "Start an engine first (Start engine button above).");
+  if (!prompt) return;
+  addTurn("user", prompt);
+  $("prompt").value = "";
+  $("trySend").disabled = true;
+  $("tryMsg").textContent = "Waiting for the engine…";
+  try {
+    const r = await api(`/api/engines/${engine}/generate`, { prompt, mode: $("tryMode").value,
+      max_tokens: +$("tryMax").value || 256, temperature: parseFloat($("tryTemp").value) || 0 });
+    const u = r.usage || {};
+    addTurn("engine", r.text, `${fmt(r.latency_s, 2)} s · ${u.completion_tokens ?? "?"} tokens out · ${u.prompt_tokens ?? "?"} in`
+      + (r.tok_per_s ? ` · ${fmt(r.tok_per_s, 0)} tok/s` : "") + ` · ${r.mode}`);
+    $("tryMsg").textContent = "";
+  } catch (e) {
+    addTurn("error", e.message);
+    $("tryMsg").textContent = "";
+  } finally {
+    $("trySend").disabled = !$("tryEngine").value;
+  }
+}
+$("trySend").addEventListener("click", sendPrompt);
+$("prompt").addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) sendPrompt(); });
+$("tryClear").addEventListener("click", () => $("chat").replaceChildren());
+
+loadEngines();
+setInterval(loadEngines, 10000);
+if (!wanted) $("prompt").focus();
+</script>
+</body>
+</html>

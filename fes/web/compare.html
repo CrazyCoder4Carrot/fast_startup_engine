@@ -1,0 +1,396 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Compare · control plane — fast engine startup</title>
+<link rel="stylesheet" href="/viz.css">
+<style>
+.tabs a.navlink { padding: 8px 14px; color: var(--text-secondary); text-decoration: none; font-weight: 560; border-bottom: 2px solid transparent; }
+.tabs a.navlink[aria-current="true"] { color: var(--text-primary); border-bottom-color: var(--text-primary); }
+.tabs a.navlink:hover { background: var(--surface-2); }
+.controls { display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: center; }
+.controls label { color: var(--text-secondary); font-size: 13px; display: flex; gap: 6px; align-items: center; }
+.controls input[type=text], .controls input[type=number] {
+  font: inherit; background: var(--surface-1); color: var(--text-primary); border: 1px solid var(--border);
+  border-radius: 8px; padding: 5px 9px; }
+.controls input[type=number] { width: 72px; }
+button.primary { background: var(--text-primary); color: var(--surface-1); border-color: var(--text-primary); font-weight: 600; }
+button.primary:hover { opacity: .88; background: var(--text-primary); }
+button:disabled { opacity: .45; cursor: not-allowed; }
+.sep { width: 1px; align-self: stretch; background: var(--border); }
+.pill { font-size: 12px; padding: 2px 9px; border-radius: 999px; background: var(--surface-2); color: var(--text-secondary); }
+.pill.busy { color: var(--text-primary); font-weight: 600; }
+.cost { color: var(--text-muted); font-size: 12px; }
+.view-btns { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 12px; }
+.view-btns button[aria-pressed="true"] { background: var(--text-primary); color: var(--surface-1); border-color: var(--text-primary); }
+pre.joblog { margin: 0; max-height: 300px; overflow: auto; font: 11.5px/1.5 ui-monospace, Menlo, monospace;
+  white-space: pre-wrap; word-break: break-all; color: var(--text-secondary); }
+pre.plan { margin: 0; font: 12px/1.55 ui-monospace, Menlo, monospace; white-space: pre; overflow-x: auto; color: var(--text-secondary); }
+td button { font-size: 12px; padding: 3px 9px; }
+.steps { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 6px 14px; margin-bottom: 10px; }
+.step { font-size: 12.5px; color: var(--text-muted); display: flex; gap: 6px; }
+.step.done { color: var(--text-primary); }
+.step.done b { color: var(--good-text); }
+.step .t { margin-left: auto; font-variant-numeric: tabular-nums; color: var(--text-secondary); }
+tr.selected td { background: var(--surface-2); }
+tbody tr.clickable { cursor: pointer; }
+.msg { font-size: 12.5px; color: var(--text-secondary); min-height: 18px; }
+.seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.seg button { border: 0; border-radius: 0; font-size: 12px; padding: 4px 12px; background: var(--surface-1); }
+.seg button[aria-pressed="true"] { background: var(--text-primary); color: var(--surface-1); }
+.pick { display: flex; align-items: center; gap: 10px; margin: 6px 0 10px; flex-wrap: wrap; }
+.pick label { display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 600; color: var(--text-secondary); }
+.pick select { height: 32px; min-width: 340px; font: inherit; font-size: 12.5px; background: var(--surface-1); color: var(--text-primary);
+  border: 1px solid var(--border); border-radius: 8px; padding: 0 8px; }
+</style>
+</head>
+<body>
+<div class="viz-root console" id="app">
+  <header class="appbar">
+    <div class="brand"><span class="logo">FS</span><div><div class="product">Fast Engine Startup</div><div class="env">Control plane · Modal · SGLang v0.5.20</div></div></div>
+    <nav class="topnav">
+      <a href="/">Engines</a>
+      <a href="/jobs">Jobs</a>
+      <a href="/playground">Playground</a>
+      <a href="/catalog">Catalog</a>
+      <a href="/compare" aria-current="page">Compare</a>
+      <a href="/analysis">Analysis</a>
+    </nav>
+    <div class="appbar-right"><span class="meta" id="updated"></span><button id="btnRefresh" class="ghost sm">Refresh</button></div>
+  </header>
+  <main class="page">
+  <section class="panel">
+    <div class="panel-head"><div><h2>Original vs current</h2>
+      <p class="sub">Original = vanilla SGLang (baseline trials in fresh sandboxes). Current = scheduler starts with today's full configuration: <b id="currentCfg"></b>. Everything else is shown as an earlier iteration.</p></div>
+      <div class="actions"><label class="muted" style="font-size:12px;display:flex;gap:6px;align-items:center">Workload
+        <select id="cmpModel" style="height:30px;border:1px solid var(--border);border-radius:8px;padding:0 8px;font:inherit;background:var(--surface-1);color:var(--text-primary)"></select></label>
+        <label class="muted" style="font-size:12px;display:flex;gap:6px;align-items:center;white-space:nowrap">$ / GPU-hour
+        <input type="number" id="price" value="3.95" step="0.05" min="0" style="width:74px;height:30px;border:1px solid var(--border);border-radius:8px;padding:0 8px;font:inherit;background:var(--surface-1);color:var(--text-primary)"></label></div></div>
+  </section>
+  <section class="kpis" id="kpis"></section>
+
+  <div class="grid">
+    <div class="card span-12">
+      <div class="card-head"><h2>Original vs current implementation</h2>
+        <div class="seg" role="group" aria-label="Comparison mode" style="margin-left:auto">
+          <button id="modeTwo" aria-pressed="true">Compare two</button><button id="modeAll" aria-pressed="false">All runs</button></div>
+        <button class="toggle" id="cmpToggle" style="margin-left:8px">Table</button></div>
+      <div class="pick" id="pickRow">
+        <label>Run A <select id="pickA"></select></label>
+        <button id="swapAB" class="ghost sm" title="Swap A and B">⇄</button>
+        <label>Run B <select id="pickB"></select></label>
+      </div>
+      <p class="sub" id="cmpSub">Original = vanilla SGLang launch, re-measured in fresh sandboxes (baseline trials). Current = compile cache restored from the artifact catalog (jit_cache trials + scheduler starts). Pick a view:</p>
+      <div class="view-btns" id="views"></div>
+      <div id="cmp"></div>
+    </div>
+
+  </div>
+  </main>
+  <div class="tip" id="tip" role="status" aria-live="polite"></div>
+</div>
+
+<script src="/viz.js"></script>
+<script>
+"use strict";
+const S = { cmp: null, view: "ready" };
+const price = () => Math.max(0, parseFloat($("price").value) || 0);
+// GPUs and their list price follow the selected workload (key "model|B200x8|groups").
+const GPU_PRICE = { H100: 3.95, B200: 6.25, H200: 4.54 };
+const workloadHw = () => {
+  const m = /\|([A-Za-z0-9]+)x(\d+)\|/.exec($("cmpModel").value || "") || [];
+  return { type: m[1] || "H100", gpus: +(m[2] || 2) };
+};
+const GPUS_NOW = () => workloadHw().gpus;
+const dollars = (gpuSeconds) => `$${((gpuSeconds / 3600) * GPUS_NOW() * price()).toFixed(2)}`;
+function applyWorkloadPrice() {  // default list price for the workload's GPU type; still editable
+  $("price").value = (GPU_PRICE[workloadHw().type] ?? 3.95).toFixed(2);
+}
+async function api(path) {
+  const r = await fetch(path);
+  const d = await r.json();
+  if (!r.ok) throw new Error(d.error || r.statusText);
+  return d;
+}
+
+// ---------------------------------------------------------------- comparison
+const VIEWS = [
+  ["ready", "Time to ready"],
+  ["phases", "Phase breakdown"],
+  ["savings", "Savings by phase"],
+  ["gpu", "GPU-seconds & cost"],
+  ["serving", "Serving quality"],
+];
+VIEWS.forEach(([k, label]) => {
+  const b = h("button", { "aria-pressed": String(k === S.view) }, label);
+  b.addEventListener("click", () => {
+    S.view = k;
+    document.querySelectorAll("#views button").forEach((x) => x.setAttribute("aria-pressed", String(x === b)));
+    renderCompare();
+  });
+  $("views").appendChild(b);
+});
+$("cmpToggle").addEventListener("click", () => {
+  state.tables.cmp = !state.tables.cmp;
+  $("cmpToggle").textContent = state.tables.cmp ? "Chart" : "Table";
+  renderCompare();
+});
+// Served by the control plane, which reloads the comparison code on every request.
+const CMP_SOURCES = ["/api/compare"];
+async function loadCompare() {
+  let d = null;
+  for (const url of CMP_SOURCES) {
+    try { const r = await fetch(url); if (r.ok) { d = await r.json(); if (d.items) break; } } catch (e) { /* try the next source */ }
+  }
+  if (!d || !d.items) return;
+  S.cmp = d;
+  const sel = $("cmpModel"), keep = sel.value;
+  if (!d.workloads) {  // a server with older comparison code: one workload per model
+    d.workloads = d.models.map((m) => ({ key: m, label: m.split("/")[1] }));
+    d.items.forEach((i) => { i.workload = i.workload || i.model; });
+  }
+  sel.replaceChildren(...d.workloads.map((w) => h("option", { value: w.key }, w.label)));
+  if (d.workloads.some((w) => w.key === keep)) sel.value = keep;
+  else applyWorkloadPrice();
+  $("updated").textContent = "updated " + new Date().toLocaleTimeString();
+  $("currentCfg").textContent = d.current_config;
+  fillPickers();
+  renderKpis();
+  renderCompare();
+}
+const SIDE_NAME = { original: "Original", iteration: "Earlier iteration", current: "Current" };
+const SIDES = ["Original", "Earlier iteration", "Current"];
+const ORIG = () => css("--text-muted"), CUR = () => color(0);
+const sideColor = (side) => (side === "Original" || side === "Run A" ? ORIG() : CUR());
+const sideOpacity = (side) => (side === "Earlier iteration" ? 0.38 : 1);
+const activeSides = () => (S.mode === "two" ? ["Run A", "Run B"] : SIDES);
+S.mode = "two";
+function modelItems() {
+  const w = $("cmpModel").value || S.cmp.workloads[0].key;
+  return S.cmp.items.filter((i) => i.workload === w).map((i) => ({ ...i, side: SIDE_NAME[i.side] }));
+}
+const runLabel = (i) => `${i.label} · ${i.stack} · ${fmt(i.end_to_end_s, 0)} s`;
+function fillPickers() {
+  const all = modelItems();
+  for (const [id, fallbackSide] of [["pickA", "Original"], ["pickB", "Current"]]) {
+    const sel = $(id), keep = sel.value;
+    sel.replaceChildren();
+    for (const side of SIDES) {
+      const rows = all.filter((i) => i.side === side);
+      if (!rows.length) continue;
+      const g = document.createElement("optgroup");
+      g.label = side;
+      [...rows].reverse().forEach((i) => g.appendChild(h("option", { value: i.id }, runLabel(i))));  // newest first
+      sel.appendChild(g);
+    }
+    const ids = all.map((i) => i.id);
+    if (ids.includes(keep)) sel.value = keep;
+    else {  // default: newest of the preferred side, else newest run (Run B: not Run A's, if possible)
+      const newest = [...all].reverse(), a = id === "pickB" ? $("pickA").value : null;
+      const pref = newest.find((i) => i.side === fallbackSide && i.id !== a) || newest.find((i) => i.id !== a) || newest[0];
+      if (pref) sel.value = pref.id;
+    }
+  }
+}
+function items() {
+  const all = modelItems();
+  if (S.mode !== "two") return all;
+  const a = all.find((i) => i.id === $("pickA").value), b = all.find((i) => i.id === $("pickB").value);
+  return [a && { ...a, side: "Run A", _pick: "A" }, b && { ...b, side: "Run B", _pick: "B" }].filter(Boolean);
+}
+// Two groups to compare: A vs B in "Compare two" mode, original vs current otherwise.
+function pairGroups(all) {
+  if (S.mode === "two") return [all.filter((i) => i._pick === "A"), all.filter((i) => i._pick === "B")];
+  return [all.filter((i) => i.side === "Original"), all.filter((i) => i.side === "Current")];
+}
+const pairNames = () => (S.mode === "two" ? ["Run A", "Run B"] : ["original", "current"]);
+function renderKpis() {
+  const all = items();
+  const [O, C] = pairGroups(all), [nO, nC] = pairNames();
+  const box = $("kpis");
+  box.replaceChildren();
+  if (S.mode === "two" && $("pickA").value && $("pickA").value === $("pickB").value) {
+    box.appendChild(kpi("—", "", "Comparison", modelItems().length < 2 ? "only one run for this workload so far" : "Run A and Run B are the same run: pick two different runs"));
+    return;
+  }
+  if (!O.length || !C.length) { box.appendChild(kpi("—", "", "Comparison", S.mode === "two" ? "pick Run A and Run B" : `needs launches on both sides for this workload (original ${O.length}, current ${C.length})`)); return; }
+  const mo = median(O.map((i) => i.end_to_end_s)), mc = median(C.map((i) => i.end_to_end_s));
+  const go = median(O.map((i) => i.gpu_billed_s)), gc = median(C.map((i) => i.gpu_billed_s));
+  const gro = median(O.map((i) => i.graph_s)), grc = median(C.map((i) => i.graph_s));
+  const loads = [...O, ...C].map((i) => i.load_s).filter((x) => x > 0);
+  box.append(
+    kpi(fmt(mc, 0), "s", `Startup (request → ready, excl. GPU scheduling), ${nC}${S.mode === "two" ? "" : " (median)"}`, `${nO} ${fmt(mo, 0)} s · ${mc <= mo ? "−" : "+"}${fmt(Math.abs(mo - mc), 0)} s (${fmt((100 * (mo - mc)) / mo, 0)}% faster)`, mc < mo),
+    kpi(fmt(gc, 0), "s", `GPU billed before ready, ${nC}`, `${nO} ${fmt(go, 0)} s · ${dollars(gc)} vs ${dollars(go)} per start`, gc < go),
+    kpi(fmt(grc, 1), "s", `CUDA graph capture, ${nC}`, `${nO} ${fmt(gro, 1)} s`, grc < gro),
+    kpi(fmt(median(C.map((i) => i.load_s).filter((x) => x > 0)), 1), "s", `Weight load, ${nC}`, `${nO} ${fmt(median(O.map((i) => i.load_s).filter((x) => x > 0)), 1)} s`,
+        median(C.map((i) => i.load_s).filter((x) => x > 0)) < median(O.map((i) => i.load_s).filter((x) => x > 0))),
+    S.mode === "two" ? kpi(C[0].stack === O[0].stack ? "same" : "Δ", "", "Configuration", `A: ${O[0].stack} · B: ${C[0].stack}`)
+      : kpi(`${O.length} / ${C.length}`, "", "Launches compared", `original / current · plus ${all.length - O.length - C.length} earlier iterations`),
+  );
+}
+
+function sectioned(host, rowsFn, opts) {
+  // Horizontal bars with "Original" / "Current" sections and a median tick per section.
+  const all = items();
+  const W = 1200, left = 420, right = 150, rowH = 20, gap = 8, secGap = 28, top = 8;
+  const H = top + all.length * (rowH + gap) + activeSides().length * secGap + 26;
+  const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, width: "100%", role: "img", "aria-label": opts.label }, host);
+  const max = Math.max(...all.map(opts.total), 1);
+  const ticks = niceTicks(max, 8), xmax = ticks[ticks.length - 1];
+  const x = (v) => left + (v / xmax) * (W - left - right);
+  for (const t of ticks) {
+    el("line", { x1: x(t), x2: x(t), y1: top, y2: H - 22, stroke: css("--grid") }, svg);
+    text(svg, x(t), H - 6, `${t}${opts.unit || "s"}`, { "text-anchor": "middle" });
+  }
+  let y = top;
+  const SECTION_TITLE = { "Original": "Original · vanilla SGLang", "Earlier iteration": "Earlier iterations · what each had enabled",
+    "Current": "Current · today's full configuration", "Run A": "Run A", "Run B": "Run B" };
+  for (const side of activeSides()) {
+    const rows = all.filter((i) => i.side === side);
+    if (!rows.length) continue;
+    text(svg, 0, y + 14, SECTION_TITLE[side], { class: "ink", "font-weight": 650, "font-size": 12.5 });
+    y += secGap;
+    const y0 = y;
+    rows.forEach((it) => {
+      text(svg, left - 12, y + rowH / 2 + 4, `${it.label} · ${it.stack}`, { "text-anchor": "end", "font-size": 11.5 });
+      rowsFn(svg, it, x, y, rowH);
+      text(svg, x(opts.total(it)) + 8, y + rowH / 2 + 4, opts.tipLabel(it), { class: "ink", "font-weight": 600 });
+      y += rowH + gap;
+    });
+    if (rows.length > 1) {  // a median of one run is just that run
+      const m = median(rows.map(opts.total));
+      el("line", { x1: x(m), x2: x(m), y1: y0 - 6, y2: y - gap + 6, stroke: css("--text-primary"), "stroke-width": 1.5, "stroke-dasharray": "4 3" }, svg);
+      text(svg, x(m) + 4, y0 - 8, `median ${fmt(m, 0)}${opts.unit || " s"}`, { "font-size": 10.5 });
+    }
+  }
+}
+
+function renderCompare() {
+  if (!S.cmp) return;
+  const host = $("cmp");
+  host.replaceChildren();
+  const G = S.cmp.groups;
+  const all = items();
+  if (!all.length) return host.appendChild(h("div", { class: "empty" }, "No launches yet."));
+
+  if (state.tables.cmp) {
+    host.appendChild(table(["Side", "Launch", "Source", "Startup s (excl. scheduling)", "GPU scheduling s (excluded)", "Spawn → ready s", "GPU billed s", "Cost", "Weight load s", "Graph capture s", ...G.map((g) => g.split(" (")[0] + " s")],
+      all.map((i) => [i.side, `${i.label} · ${i.id}`, i.source, fmt(i.end_to_end_s), fmt(i.scheduling_wait_s) + (i.scheduling_estimated ? " (est.)" : ""), fmt(i.ready_s), fmt(i.gpu_billed_s), dollars(i.gpu_billed_s),
+        fmt(i.load_s), fmt(i.graph_s), ...i.groups.map((v) => fmt(v))]), [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]));
+    return;
+  }
+
+  const legendSides = () => {
+    const leg = h("div", { class: "legend" });
+    activeSides().forEach((n) => { const it = h("span", { class: "item" }), sw = h("span", { class: "sw" }); sw.style.background = sideColor(n); sw.style.opacity = sideOpacity(n); it.append(sw, h("span", {}, n)); leg.appendChild(it); });
+    return leg;
+  };
+
+  if (S.view === "ready") {
+    $("cmpSub").textContent = S.mode === "two" ? "Startup for the two selected runs: container boot + any prep + spawn → first request served. Time Modal spends finding free GPUs (scheduling) is excluded."
+      : "Startup for each launch: container boot + any prep + spawn → first request served. Time Modal spends finding free GPUs (scheduling) is excluded. Dashed tick = median per group; faded bars are earlier iterations.";
+    sectioned(host, (svg, it, x, y, rh) => {
+      const bar = roundedBar(svg, x(0), y, Math.max(x(it.end_to_end_s) - x(0), 1), rh, sideColor(it.side), { left: false });
+      bar.setAttribute("fill-opacity", sideOpacity(it.side));
+      hover(bar, () => [`${it.label} · ${it.id}`, [{ value: `${fmt(it.end_to_end_s)} s`, name: "startup (excl. scheduling)", color: sideColor(it.side) },
+        { value: `${fmt(it.scheduling_wait_s)} s${it.scheduling_estimated ? " (est.)" : ""}`, name: "GPU scheduling, excluded" },
+        { value: `${fmt(it.container_start_s)} s`, name: "container start (incl. scheduling)" }, { value: `${fmt(it.ready_s)} s`, name: "spawn → ready" }]]);
+    }, { label: "Time to ready", total: (i) => i.end_to_end_s, tipLabel: (i) => `${fmt(i.end_to_end_s)} s` });
+    host.appendChild(legendSides());
+  }
+
+  if (S.view === "phases") {
+    $("cmpSub").textContent = "Spawn → ready split into the five phase groups (same colors as the analysis dashboard). Container start is excluded here.";
+    sectioned(host, (svg, it, x, y, rh) => {
+      let x0 = 0;
+      const nz = it.groups.map((v, g) => [v, g]).filter(([v]) => v > 0);
+      nz.forEach(([v, g], k) => {
+        const bx = x(x0), bw = Math.max(x(x0 + v) - bx - 2, 0.8);
+        const bar = roundedBar(svg, bx, y, bw, rh, color(g), { left: k === 0, right: k === nz.length - 1 });
+        hover(bar, () => [`${it.label} · ${it.id}`, [{ value: `${fmt(v)} s`, name: G[g], color: color(g) }]]);
+        if (bw > 34) text(svg, bx + bw / 2, y + rh / 2 + 4, fmt(v, 0), { "text-anchor": "middle", "font-size": 10.5 }).style.fill = g <= 1 ? "#fff" : "#0b0b0b";
+        x0 += v;
+      });
+    }, { label: "Phase breakdown", total: (i) => i.groups.reduce((a, b) => a + b, 0), tipLabel: (i) => `${fmt(i.groups.reduce((a, b) => a + b, 0))} s` });
+    const leg = h("div", { class: "legend" });
+    G.forEach((g, i) => { const it = h("span", { class: "item" }), sw = h("span", { class: "sw" }); sw.style.background = color(i); it.append(sw, h("span", {}, g)); leg.appendChild(it); });
+    host.appendChild(leg);
+  }
+
+  if (S.view === "savings") {
+    $("cmpSub").textContent = "Median seconds per phase group, original vs current. Graph capture is the approach; weight load moves with volume variance.";
+    const [O, C] = pairGroups(all);
+    const rows = G.map((g, i) => ({ g, i, o: median(O.map((x) => x.groups[i])), c: median(C.map((x) => x.groups[i])) }));
+    rows.push({ g: "Total spawn → ready", i: -1, o: median(O.map((x) => x.ready_s)), c: median(C.map((x) => x.ready_s)) });
+    const W = 1200, left = 260, right = 200, rh = 16, gi = 4, go = 16, top = 8;
+    const H = top + rows.length * (2 * rh + gi + go) + 24;
+    const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, width: "100%", role: "img", "aria-label": "Savings by phase" }, host);
+    const ticks = niceTicks(Math.max(...rows.flatMap((r) => [r.o, r.c])), 8), xmax = ticks[ticks.length - 1];
+    const x = (v) => left + (v / xmax) * (W - left - right);
+    for (const t of ticks) { el("line", { x1: x(t), x2: x(t), y1: top, y2: H - 22, stroke: css("--grid") }, svg); text(svg, x(t), H - 6, `${t}s`, { "text-anchor": "middle" }); }
+    let y = top;
+    rows.forEach((r) => {
+      text(svg, left - 12, y + rh + 4, r.g, { "text-anchor": "end", class: "ink", "font-size": 12, "font-weight": r.i < 0 ? 650 : 400 });
+      [[r.o, ORIG(), pairNames()[0]], [r.c, CUR(), pairNames()[1]]].forEach(([v, c, n], k) => {
+        const bar = roundedBar(svg, x(0), y, Math.max(x(v) - x(0), 1), rh, c, { left: false });
+        hover(bar, () => [r.g, [{ value: `${fmt(v)} s`, name: `${n} (median)`, color: c }]]);
+        text(svg, x(v) + 6, y + rh / 2 + 4, `${fmt(v)} s`, {});
+        y += rh + gi;
+      });
+      const d = r.c - r.o;
+      const lab = text(svg, W - right + 70, y - rh - gi / 2 - 4, `${d <= 0 ? "−" : "+"}${fmt(Math.abs(d))} s`, { "font-weight": 650, "font-size": 13 });
+      lab.style.fill = d <= -1 ? css("--good-text") : css("--text-secondary");
+      y += go - gi;
+    });
+    host.appendChild(legendSides());
+  }
+
+  if (S.view === "gpu") {
+    $("cmpSub").textContent = `GPU time billed before the engine could serve, and its cost at ${GPUS_NOW()} GPUs × $${price().toFixed(2)}/GPU-hour (edit the price above).`;
+    sectioned(host, (svg, it, x, y, rh) => {
+      const bar = roundedBar(svg, x(0), y, Math.max(x(it.gpu_billed_s) - x(0), 1), rh, sideColor(it.side), { left: false });
+      bar.setAttribute("fill-opacity", sideOpacity(it.side));
+      hover(bar, () => [`${it.label} · ${it.id}`, [{ value: `${fmt(it.gpu_billed_s)} s`, name: "GPU billed before ready" }, { value: dollars(it.gpu_billed_s), name: "cost" }]]);
+    }, { label: "GPU seconds billed", total: (i) => i.gpu_billed_s, tipLabel: (i) => `${fmt(i.gpu_billed_s)} s · ${dollars(i.gpu_billed_s)}` });
+    host.appendChild(legendSides());
+  }
+
+  if (S.view === "serving") {
+    $("cmpSub").textContent = "Serving after startup (sandbox trials only): 128 streaming requests at concurrency 32. The compile cache must not cost serving speed or change outputs.";
+    const rows = all.filter((i) => i.serving);
+    if (!rows.length) return host.appendChild(h("div", { class: "empty" }, "No serving-load results yet."));
+    const baseHash = (S.mode === "two" ? all.find((i) => i._pick === "A") : all.find((i) => i.side === "Original" && i.correctness_hash))?.correctness_hash;
+    const t = table(["Side", "Launch", "tok/s", "TTFT p50", "TTFT p99", "ITL p50", "ITL p99", "Output vs original"],
+      rows.map((i) => [i.side, `${i.label} · ${i.id}`, fmt(i.serving.output_tok_per_s, 0), `${fmt(i.serving.ttft_p50_ms, 0)} ms`, `${fmt(i.serving.ttft_p99_ms, 0)} ms`,
+        `${fmt(i.serving.itl_p50_ms, 2)} ms`, `${fmt(i.serving.itl_p99_ms, 2)} ms`, ""]), [2, 3, 4, 5, 6]);
+    t.querySelectorAll("tbody tr").forEach((tr, k) => {
+      const ok = rows[k].correctness_hash === baseHash;
+      const sp = h("span", { class: "status " + (ok ? "ok" : "warn") }, (ok ? "✓ identical" : "≠ differs"));
+      tr.lastChild.replaceChildren(sp);
+    });
+    host.appendChild(t);
+  }
+
+}
+
+$("price").addEventListener("input", () => { renderKpis(); renderCompare(); });
+$("btnRefresh").addEventListener("click", loadCompare);
+function rerender() { renderKpis(); renderCompare(); }
+$("cmpModel").addEventListener("change", () => { applyWorkloadPrice(); fillPickers(); rerender(); });
+["pickA", "pickB"].forEach((id) => $(id).addEventListener("change", rerender));
+$("swapAB").addEventListener("click", () => { const a = $("pickA").value; $("pickA").value = $("pickB").value; $("pickB").value = a; rerender(); });
+function setMode(m) {
+  S.mode = m;
+  $("modeTwo").setAttribute("aria-pressed", String(m === "two"));
+  $("modeAll").setAttribute("aria-pressed", String(m === "all"));
+  $("pickRow").hidden = m !== "two";
+  rerender();
+}
+$("modeTwo").addEventListener("click", () => setMode("two"));
+$("modeAll").addEventListener("click", () => setMode("all"));
+loadCompare();
+setInterval(loadCompare, 30000);
+</script>
+</body>
+</html>

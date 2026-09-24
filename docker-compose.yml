@@ -1,0 +1,60 @@
+# The whole control plane: Postgres (job queue + catalog), the API (web app), and the worker.
+#     docker compose up -d --build    # build the image and start everything: http://127.0.0.1:8060
+#     docker compose logs -f worker   # follow a service
+#     docker compose down             # stop (data kept); add -v to delete the database too
+#     docker compose up -d postgres   # only the database, to run the API / worker with `uv run`
+# API and worker are separate containers from one image, so restarting the API (e.g. after a
+# code change: docker compose up -d --build api) never interrupts a running job. Both need
+# Modal credentials: ~/.modal.toml is mounted read-only. Everything listens on localhost only.
+x-app: &app
+  build: .
+  image: fes-control-plane
+  environment:
+    DATABASE_URL: postgresql://fes:${FES_PG_PASSWORD:-fes}@postgres:5432/fes
+  volumes:
+    - ${HOME}/.modal.toml:/root/.modal.toml:ro
+    - ./results:/app/results
+  depends_on:
+    postgres:
+      condition: service_healthy
+  restart: unless-stopped
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: fes-postgres
+    environment:
+      POSTGRES_USER: fes
+      POSTGRES_PASSWORD: ${FES_PG_PASSWORD:-fes}
+      POSTGRES_DB: fes
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - fes-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fes -d fes"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  api:
+    <<: *app
+    container_name: fes-api
+    command: ["--role", "api", "--host", "0.0.0.0", "--port", "8060"]
+    ports:
+      - "127.0.0.1:8060:8060"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8060/api/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  worker:
+    <<: *app
+    container_name: fes-worker
+    command: ["--role", "worker"]
+    stop_grace_period: 5s
+
+volumes:
+  fes-pg:

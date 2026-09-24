@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Catalog · control plane — fast engine startup</title>
+<link rel="stylesheet" href="/viz.css">
+<style>
+.msg { font-size: 12.5px; color: var(--text-secondary); min-height: 17px; }
+.cell-sub { font-size: 11.5px; color: var(--text-muted); margin-top: 1px; }
+table.data td .mono { white-space: nowrap; }
+.loc { display: flex; align-items: center; gap: 6px; font-size: 12px; margin: 1px 0; }
+.check { font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 6px; }
+.check.ok { color: var(--good-text); background: color-mix(in srgb, var(--good-text) 11%, transparent); }
+.check.no { color: var(--text-secondary); background: var(--surface-2); }
+.kind { font-size: 11.5px; font-weight: 600; padding: 2px 8px; border-radius: 6px; background: var(--surface-2); color: var(--text-secondary); }
+.delta-up { color: var(--critical-text); }
+.delta-down { color: var(--good-text); }
+.empty { color: var(--text-muted); font-size: 13px; padding: 14px 0; }
+.section-gap { margin-top: 16px; }
+</style>
+</head>
+<body>
+<div class="viz-root console" id="app">
+  <header class="appbar">
+    <div class="brand"><span class="logo">FS</span><div><div class="product">Fast Engine Startup</div><div class="env">Control plane · Modal · SGLang v0.5.20</div></div></div>
+    <nav class="topnav">
+      <a href="/">Engines</a>
+      <a href="/jobs">Jobs</a>
+      <a href="/playground">Playground</a>
+      <a href="/catalog" aria-current="page">Catalog</a>
+      <a href="/compare">Compare</a>
+      <a href="/analysis">Analysis</a>
+    </nav>
+    <div class="appbar-right"><span class="pill" id="readAt">…</span></div>
+  </header>
+  <main class="page">
+    <div class="kpis" id="kpis"></div>
+
+    <section class="panel">
+      <div class="panel-head"><div><h2>Artifacts</h2>
+        <p class="sub">Reusable startup state the scheduler plans from. Weights are keyed by model and revision. Compile caches are keyed by SGLang version, GPU, TP and model config, so any workload with the same key reuses one (2×H100 and 4×H100 groups share the TP=2 cache). A copy is validated once an engine has served traffic with it.</p></div>
+        <div class="actions"><button id="btnReconcile" class="ghost sm" title="Scan the volumes and register what is really there; incomplete downloads are removed">Reconcile with volumes</button></div></div>
+      <div id="artifacts"></div>
+      <div class="msg" id="msg"></div>
+    </section>
+
+    <section class="panel section-gap">
+      <div class="panel-head"><div><h2>Volumes</h2>
+        <p class="sub">Each model has its own Modal volumes, so loading one model never competes with another's reads. A model the catalog hasn't seen gets new volumes on its first start (weights on the prep worker, compile cache on write-back).</p></div></div>
+      <div id="volumes"></div>
+    </section>
+
+    <section class="panel section-gap">
+      <div class="panel-head"><div><h2>Engine registry</h2>
+        <p class="sub">Engines the control plane is tracking. Engines in the same sandbox (GPU groups) share its lifetime. The reconciler checks every 30 s that each one is still running.</p></div></div>
+      <div id="engines"></div>
+    </section>
+
+    <section class="panel section-gap">
+      <div class="panel-head"><div><h2>Learned timings</h2>
+        <p class="sub">The scheduler's estimates. Each model learns its own from its launches (exponential moving average, weight 0.5); until it has a value it borrows the shared one, which starts from the vanilla-baseline prior. Starts with several engines per host don't feed these.</p></div></div>
+      <div id="stats"></div>
+    </section>
+  </main>
+  <div class="tip" id="tip" role="status" aria-live="polite"></div>
+</div>
+<script src="/viz.js"></script>
+<script>
+"use strict";
+const shortModel = (m) => (m || "").split("/").pop().replace("-Instruct-2507", "");
+const gb = (b) => (b == null ? "—" : b >= 1e9 ? `${fmt(b / 1e9, 1)} GB` : `${fmt(b / 1e6, 1)} MB`);
+const when = (t) => (t ? new Date(t * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "—");
+const msg = (t) => ($("msg").textContent = t);
+// A volume name, linked to its Modal dashboard page when the control plane knows the URL.
+let VOLUME_URLS = {};
+function volLink(name) {
+  const url = VOLUME_URLS[name];
+  return url ? h("a", { href: url, target: "_blank", rel: "noopener", class: "mono", title: `Open ${name} on Modal` }, `${name} ↗`)
+    : h("span", { class: "mono" }, name);
+}
+async function api(path, body) {
+  const r = await fetch(path, body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const d = await r.json();
+  if (!r.ok) throw new Error(d.error || r.statusText);
+  return d;
+}
+
+// What each learned timing means (units are in the name: _s seconds, _gbps GB/s).
+const STAT_TEXT = {
+  container_start_s: "Sandbox create → container running",
+  other_s: "Imports, NCCL, model init, KV cache, warmup (ready − weights − graphs)",
+  graph_s_miss: "CUDA graph capture, full sizes, no compile cache",
+  graph_s_hit: "CUDA graph capture, full sizes, compile cache hit",
+  graph_s_hit_pow2: "CUDA graph capture, pow2 sizes, compile cache hit",
+  graph_s_miss_pow2: "CUDA graph capture, pow2 sizes, no compile cache",
+  volume_gbps: "Weights: volume → GPU with a cold page cache",
+  hf_gbps: "Weights: Hugging Face → volume (CPU worker)",
+  restore_gbps: "Compile cache: volume → local disk",
+  pre_load_s: "Spawn → \"Load weight begin\" (window the weight prefetch overlaps)",
+  warm_load_s: "Weight load with shards already in page cache",
+  prefetch_gbps: "Weight prefetch read rate (volume → page cache)",
+  model_samples: null,
+  samples: "Launches observed",
+};
+
+function describe(a) {
+  const i = a.inputs || {};
+  if (a.kind === "weights") return [shortModel(i.model), `revision ${i.revision || "main"}`];
+  if (a.kind === "compile") return [`SGLang ${i.sglang} · ${(i.gpu || "").replace("NVIDIA ", "")} · TP=${i.tp}`,
+    `config of ${shortModel(i.model_arch_of)}${i.dirs ? " · " + i.dirs.map((d) => d.split("/").slice(-2).join("/")).join(", ") : ""}`];
+  return [JSON.stringify(i), ""];
+}
+
+function render(c) {
+  const arts = Object.values(c.artifacts || {}), E = Object.entries(c.engines || {}), st = c.stats || {}, pri = c.priors || {};
+  VOLUME_URLS = c.volume_urls || {};
+  $("readAt").textContent = `Postgres catalog · read ${new Date(c.read_at * 1000).toLocaleTimeString()}`;
+  const validated = arts.filter((a) => a.locations.some((l) => l.validated)).length;
+  $("kpis").replaceChildren(
+    kpi(String(arts.length), "", "Artifacts", `${validated} validated by a served engine`, validated === arts.length),
+    kpi(gb(arts.reduce((s, a) => s + (a.bytes || 0), 0)).split(" ")[0], gb(arts.reduce((s, a) => s + (a.bytes || 0), 0)).split(" ")[1], "Stored", `${arts.filter((a) => a.kind === "weights").length} weights · ${arts.filter((a) => a.kind === "compile").length} compile caches`),
+    kpi(String(E.length), "", "Engines tracked", E.length ? `${E.filter(([, e]) => e.group).length} in GPU groups` : "none serving"),
+    kpi(String(st.samples ?? 0), "", "Launches learned from", "feed the scheduler's estimates"));
+
+  // artifacts
+  if (!arts.length) $("artifacts").replaceChildren(h("div", { class: "empty" }, "The catalog is empty. Reconcile with volumes to register what already exists."));
+  else {
+    arts.sort((a, b) => a.kind.localeCompare(b.kind) || (b.bytes || 0) - (a.bytes || 0));
+    const t = table(["Kind", "Key", "What", "Size", "Volume", "Created", "Last used"], arts.map(() => ["", "", "", "", "", "", ""]), [3]);
+    t.classList.add("data");
+    t.querySelectorAll("tbody tr").forEach((tr, i) => {
+      const a = arts[i], [what, sub] = describe(a);
+      tr.children[0].replaceChildren(h("span", { class: "kind" }, a.kind));
+      tr.children[1].replaceChildren(h("div", { class: "mono" }, a.key));
+      tr.children[2].replaceChildren(h("div", {}, what), h("div", { class: "cell-sub" }, sub));
+      tr.children[3].textContent = gb(a.bytes);
+      // A copy's uri is "<volume>:<path>" for the volume tier.
+      const split = (l) => { const i = l.uri.indexOf(":"); return l.tier === "volume" && i > 0 ? [l.uri.slice(0, i), l.uri.slice(i + 1)] : [l.tier, l.uri]; };
+      tr.children[4].replaceChildren(...a.locations.map((l) => {
+        const row = h("div", { class: "loc" });  // h() takes text only, so children are appended
+        row.title = l.uri;  // full location on hover
+        row.append(l.tier === "volume" ? volLink(split(l)[0]) : h("span", { class: "mono" }, split(l)[0]),
+          h("span", { class: "check " + (l.validated ? "ok" : "no") }, l.validated ? "validated" : "unverified"));
+        return row;
+      }));
+      tr.children[5].textContent = when(Math.min(...a.locations.map((l) => l.created)));
+      tr.children[6].textContent = when(a.last_used);
+    });
+    $("artifacts").replaceChildren(t);
+  }
+
+  // volumes per model
+  const V = Object.entries(c.volumes || {});
+  const volOf = (a) => (a.locations.find((l) => l.tier === "volume") || { uri: "" }).uri.split(":")[0];
+  const vt = table(["Model", "Weights volume", "Compile-cache volume", "Stored"], V.map(() => ["", "", "", ""]), [3]);
+  vt.classList.add("data");
+  vt.querySelectorAll("tbody tr").forEach((tr, i) => {
+    const [m, v] = V[i];
+    const onW = arts.filter((a) => volOf(a) === v.weights), onA = arts.filter((a) => volOf(a) === v.artifacts);
+    tr.children[0].textContent = shortModel(m);
+    tr.children[1].replaceChildren(h("div", {}), h("div", { class: "cell-sub" }, onW.length ? "weights staged" : "empty (created on first start)"));
+    tr.children[2].replaceChildren(h("div", {}), h("div", { class: "cell-sub" }, onA.length ? `${onA.length} compile cache${onA.length > 1 ? "s" : ""}` : "empty (created on first cache miss)"));
+    tr.children[1].firstChild.append(volLink(v.weights));
+    tr.children[2].firstChild.append(volLink(v.artifacts));
+    tr.children[3].textContent = gb([...onW, ...onA].reduce((s, a) => s + (a.bytes || 0), 0));
+  });
+  $("volumes").replaceChildren(V.length ? vt : h("div", { class: "empty" }, "No models known yet."));
+
+  // engines
+  if (!E.length) $("engines").replaceChildren(h("div", { class: "empty" }, "No engines tracked. Start one on the Engines page."));
+  else {
+    const t = table(["Engine", "Workload", "Volumes mounted", "Sandbox", "Endpoint", "Expires"], E.map(() => ["", "", "", "", "", ""]));
+    t.classList.add("data");
+    t.querySelectorAll("tbody tr").forEach((tr, i) => {
+      const [id, e] = E[i], gpu = (e.gpu || "").replace("!", "");
+      tr.children[0].replaceChildren(h("div", { class: "mono" }, id), h("div", { class: "cell-sub" }, e.job_id ? `job ${e.job_id}` : ""));
+      tr.children[1].replaceChildren(h("div", {}, shortModel(e.model)), h("div", { class: "cell-sub" },
+        e.group ? `group ${e.group.toUpperCase()} · GPU ${e.devices.replace(",", "-")} of ${gpu.split(":")[1]}×${gpu.split(":")[0]} · TP=${e.tp}` : `${gpu.split(":")[1]}×${gpu.split(":")[0]} · TP=${e.tp}`));
+      const v = (c.volumes || {})[e.model] || {};
+      const wv = h("div", {}), av = h("div", { class: "cell-sub" });
+      if (v.weights) wv.append(volLink(v.weights)); else wv.textContent = "—";
+      if (v.artifacts) av.append(volLink(v.artifacts), " (compile cache)");
+      tr.children[2].replaceChildren(wv, av);
+      tr.children[3].replaceChildren(h("div", { class: "mono" }, e.sandbox_id));
+      tr.children[4].replaceChildren(h("a", { href: e.url + "/get_model_info", target: "_blank", rel: "noopener", class: "mono" }, e.url.replace("https://", "").slice(0, 30) + "… ↗"));
+      tr.children[5].textContent = when(e.expires_at);
+    });
+    $("engines").replaceChildren(t);
+  }
+
+  // learned timings: shared, then each model's own (a model without its own value borrows the shared one)
+  const MS = Object.entries(c.model_stats || {});
+  const names = Object.keys(STAT_TEXT).filter((k) => STAT_TEXT[k] && (k in st || MS.some(([, o]) => k in o)));
+  const t = table(["Estimate", "Meaning", "Prior", "Shared", "Change", ...MS.map(([m]) => shortModel(m))],
+    names.map(() => ["", "", "", "", "", ...MS.map(() => "")]), [2, 3, 4, ...MS.map((_, j) => 5 + j)]);
+  t.classList.add("data");
+  t.querySelectorAll("tbody tr").forEach((tr, i) => {
+    const k = names[i], p = pri[k], v = st[k], d = k === "samples" ? 0 : 2;
+    tr.children[0].replaceChildren(h("div", { class: "mono" }, k));
+    tr.children[1].textContent = k === "samples" ? "Launches learned from" : STAT_TEXT[k];
+    tr.children[2].textContent = k === "samples" ? "" : fmt(p, d);
+    tr.children[3].textContent = fmt(v, d);
+    MS.forEach(([, own], j) => {
+      const cell = tr.children[5 + j];
+      if (k in own) cell.textContent = fmt(own[k], d);
+      else cell.replaceChildren(h("span", { class: "cell-sub", title: "no measurement for this model yet: uses the shared value" }, "shared"));
+    });
+    if (k !== "samples" && p) {
+      const pct = (100 * (v - p)) / p;
+      // Lower is better for durations; higher is better for bandwidths.
+      const better = k.endsWith("_gbps") ? pct > 0 : pct < 0;
+      tr.children[4].replaceChildren(Math.abs(pct) < 0.5 ? h("span", { class: "cell-sub" }, "prior")
+        : h("span", { class: better ? "delta-down" : "delta-up" }, `${pct > 0 ? "+" : ""}${fmt(pct, 0)}%`));
+    }
+  });
+  $("stats").replaceChildren(t);
+}
+
+async function load() {
+  try { render(await api("/api/catalog")); } catch (e) { msg("Could not read the catalog: " + e.message); }
+}
+$("btnReconcile").addEventListener("click", async () => {
+  msg("Scanning volumes…");
+  try {
+    const r = await api("/api/catalog/reconcile", {});
+    msg(`Reconciled: ${r.found.length} artifact${r.found.length === 1 ? "" : "s"} found on the volumes.`);
+    load();
+  } catch (e) { msg("Reconcile failed: " + e.message); }
+});
+load();
+setInterval(load, 15000);
+</script>
+</body>
+</html>

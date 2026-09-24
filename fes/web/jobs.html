@@ -1,0 +1,356 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Jobs · control plane — fast engine startup</title>
+<link rel="stylesheet" href="/viz.css">
+<style>
+.launch-grid { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 20px; }
+@media (max-width: 1000px) { .launch-grid { grid-template-columns: 1fr; } }
+.form { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px 16px; align-content: start; }
+.form .wide { grid-column: 1 / -1; }
+.form .half { grid-column: span 2; }
+.field { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.field label { font-size: 11.5px; font-weight: 600; color: var(--text-secondary); letter-spacing: .01em; }
+.field .hint { font-size: 11.5px; color: var(--text-muted); }
+.field select, .field input { width: 100%; height: 34px; font: inherit; font-size: 13px; background: var(--surface-1); color: var(--text-primary);
+  border: 1px solid var(--border); border-radius: 8px; padding: 0 10px; }
+details.advanced { border-top: 1px solid var(--border); padding-top: 10px; }
+details.advanced summary { cursor: pointer; font-size: 12.5px; color: var(--text-secondary); font-weight: 600; }
+.adv-grid { display: grid; grid-template-columns: 3fr 1fr; gap: 14px 16px; margin-top: 12px; }
+.predict { border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; background: var(--surface-0);
+  display: flex; flex-direction: column; gap: 10px; }
+.predict-label { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--text-muted); font-weight: 600; }
+.predict-main { font-size: 34px; font-weight: 680; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; line-height: 1; }
+.predict-main small { font-size: 13px; font-weight: 500; color: var(--text-secondary); margin-left: 6px; letter-spacing: 0; }
+.predict dl { margin: 0; display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.predict dt { font-size: 11px; color: var(--text-muted); }
+.predict dd { margin: 2px 0 0; font-weight: 600; font-size: 13.5px; font-variant-numeric: tabular-nums; }
+.flags { display: flex; flex-wrap: wrap; gap: 5px; }
+.flag { font-size: 11.5px; padding: 2px 8px; border-radius: 6px; background: var(--surface-2); color: var(--text-secondary); }
+.flag.on { color: var(--good-text); background: color-mix(in srgb, var(--good-text) 11%, transparent); }
+.flag.off { color: var(--critical-text); background: color-mix(in srgb, var(--critical-text) 9%, transparent); }
+button.block { width: 100%; height: 38px; font-size: 14px; }
+.msg { font-size: 12.5px; color: var(--text-secondary); min-height: 17px; }
+.split { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 16px; align-items: start; }
+@media (max-width: 1100px) { .split { grid-template-columns: 1fr; } }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 10px; }
+.chips button { font-size: 12px; padding: 3px 10px; border-radius: 999px; }
+.chips button[aria-pressed="true"] { background: var(--text-primary); color: var(--surface-1); border-color: var(--text-primary); }
+.chips .count { color: var(--text-muted); margin-left: 5px; font-variant-numeric: tabular-nums; }
+.chips button[aria-pressed="true"] .count { color: var(--surface-2); }
+tr.selected td { background: var(--surface-2); }
+tr.selected td:first-child { box-shadow: inset 3px 0 0 var(--text-primary); }
+table.data td .mono, table.data td > div:first-child { white-space: nowrap; }
+tbody tr.clickable { cursor: pointer; }
+.cell-sub { font-size: 11.5px; color: var(--text-muted); margin-top: 1px; }
+.life { display: flex; align-items: center; gap: 8px; }
+.life .track { width: 90px; height: 6px; border-radius: 3px; background: var(--surface-2); overflow: hidden; flex: none; }
+.life .fill { height: 100%; background: var(--good-text); border-radius: 3px; }
+.life .fill.low { background: var(--critical-text); }
+.row-actions { display: flex; gap: 6px; justify-content: flex-end; }
+pre.joblog { margin: 10px 0 0; max-height: 320px; overflow: auto; font: 11.5px/1.5 ui-monospace, Menlo, monospace; white-space: pre-wrap;
+  word-break: break-all; color: var(--text-secondary); background: var(--surface-0); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
+.play-controls { display: grid; grid-template-columns: 2fr 1fr 110px 110px auto; gap: 12px; align-items: end; margin-bottom: 10px; }
+textarea#prompt { width: 100%; min-height: 80px; resize: vertical; font: 13.5px/1.5 inherit; font-family: inherit; background: var(--surface-1);
+  color: var(--text-primary); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; }
+.send-row { display: flex; gap: 12px; align-items: center; margin-top: 8px; }
+.chat { display: flex; flex-direction: column; gap: 10px; margin-top: 12px; max-height: 460px; overflow: auto; }
+.turn { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; background: var(--surface-1); }
+.turn.user { background: var(--surface-0); }
+.turn .who { font-size: 11px; color: var(--text-muted); margin-bottom: 4px; text-transform: uppercase; letter-spacing: .05em; font-weight: 600; }
+.turn .body { white-space: pre-wrap; word-break: break-word; font-size: 13.5px; }
+.turn .stats { font-size: 11.5px; color: var(--text-muted); margin-top: 6px; font-variant-numeric: tabular-nums; }
+.empty { color: var(--text-muted); padding: 22px; text-align: center; font-size: 13px; }
+.split { grid-template-columns: minmax(0, 11fr) minmax(0, 9fr); }
+#jobs { overflow-x: auto; }
+table.data td:nth-child(5) { max-width: 170px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+</style>
+</head>
+<body>
+<div class="viz-root console" id="app">
+  <header class="appbar">
+    <div class="brand"><span class="logo">FS</span><div><div class="product">Fast Engine Startup</div><div class="env">Control plane · Modal · SGLang v0.5.20</div></div></div>
+    <nav class="topnav">
+      <a href="/">Engines</a>
+      <a href="/jobs" aria-current="page">Jobs</a>
+      <a href="/playground">Playground</a>
+      <a href="/catalog">Catalog</a>
+      <a href="/compare">Compare</a>
+      <a href="/analysis">Analysis</a>
+    </nav>
+    <div class="appbar-right"><span class="meta" id="health"></span><span class="pill" id="busy">Idle</span></div>
+  </header>
+  <main class="page">
+    <div class="split">
+      <section class="panel">
+        <div class="panel-head"><div><h2>Jobs</h2><p class="sub">Every engine start and benchmark, queued one GPU job at a time; history is durable.</p><div class="msg" id="msg"></div></div></div>
+        <div class="chips" id="jobFilters" role="group" aria-label="Filter jobs by status"></div>
+        <div id="jobs"></div>
+      </section>
+      <section class="panel">
+        <div class="panel-head"><div><h2 id="jobTitle">Job</h2><p class="sub" id="jobMeta">Select a job to follow its live event stream.</p></div>
+          <div class="actions"><button id="btnCancel" class="danger sm" hidden>Cancel job</button></div></div>
+        <div id="steps"></div>
+        <pre class="joblog" id="jobLog"></pre>
+      </section>
+    </div>
+  </main>
+  <div class="tip" id="tip" role="status" aria-live="polite"></div>
+</div>
+<script src="/viz.js"></script>
+<script>
+"use strict";
+const S = { jobId: new URLSearchParams(location.search).get("job") };
+const shortModel = (m) => (m || "Qwen/Qwen3-30B-A3B-Instruct-2507").split("/").pop().replace("-Instruct-2507", "");
+// Workload = what the job runs: model, how many engines, on which hardware.
+function workload(j) {
+  const p = j.params || {}, gpu = (p.gpu || "H100!:2").replace("!", ""), groups = +p.groups || 1;
+  const hw = `${gpu.split(":")[1]}×${gpu.split(":")[0]}` + (p.tp ? ` · TP=${p.tp}` : "");
+  if (j.kind === "bench") return { main: `${shortModel(p.model)} · benchmark`, sub: `${(p.approaches || []).join(", ")} · ${hw}` };
+  return groups > 1 ? { main: `${shortModel(p.model)} × ${groups} engines`, sub: `${hw} each group · A: GPU 0-1 · B: GPU 2-3` }
+    : { main: shortModel(p.model), sub: hw };
+}
+const msg = (t) => ($("msg").textContent = t);
+async function api(path, body) {
+  const r = await fetch(path, body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const d = await r.json();
+  if (!r.ok) throw new Error(d.error || r.statusText);
+  return d;
+}
+$("btnCancel").addEventListener("click", async () => {
+  const serving = S.job?.status === "serving";
+  if (!S.jobId || !confirm(serving ? `Stop the engine started by job ${S.jobId}?` : `Cancel job ${S.jobId}? Its sandboxes are terminated immediately.`)) return;
+  try { const j = await api(`/api/jobs/${S.jobId}/cancel`, {}); msg(`Job ${j.id}: ${j.status}.`); refreshState(); }
+  catch (e) { msg("Cancel failed: " + e.message); }
+});
+
+const ACTIVE = (st) => st === "queued" || st === "running";
+async function refreshState() {
+  const [health, allJobs] = await Promise.all([api("/api/health"), api("/api/jobs?limit=200")]);
+  const busy = health.running + health.queued > 0;
+  $("busy").textContent = busy ? `${health.running} running · ${health.queued} queued` : "Idle";
+  $("busy").classList.toggle("busy", busy);
+  $("health").textContent = `Uptime ${fmt(health.uptime_s / 60, 0)} min · reconciler ${health.reconciler.at ? "healthy" : "starting"}`;
+  renderJobFilters(allJobs);
+  const f = JOB_FILTERS.find(([k]) => k === S.jobFilter) || JOB_FILTERS[0];
+  const jobs = allJobs.filter((j) => f[2](j.status)).slice(0, 50);
+
+  const box = $("jobs");
+  if (!jobs.length) box.replaceChildren(h("div", { class: "empty" }, allJobs.length ? `No ${f[1].toLowerCase()} jobs.` : "No jobs yet."));
+  else {
+    const t = table(["Job", "Workload", "Status", "Duration", "Result", ""], jobs.map((j) => {
+      const dur = j.started ? ((j.ended || Date.now() / 1000) - j.started) : 0;
+      const r = j.result || {};
+      const res = r.url ? `ready in ${fmt(r.startup_s ?? r.request_to_ready_s, 0)} s` + (r.scheduling_wait_s > 1 ? ` (+${fmt(r.scheduling_wait_s, 0)} s GPU scheduling)` : "") : r.trials ? `${r.trials.length} trials` : (j.error || "").slice(0, 40);
+      return ["", "", "", dur ? `${fmt(dur, 0)} s` : "—", res, ""];
+    }), [3]);
+    t.classList.add("data");
+    t.querySelectorAll("tbody tr").forEach((tr, i) => {
+      const j = jobs[i], p = j.params || {};
+      tr.classList.add("clickable");
+      if (j.id === S.jobId) tr.classList.add("selected");
+      tr.addEventListener("click", () => selectJob(j.id));
+      tr.children[0].replaceChildren(h("div", { class: "mono" }, j.id), h("div", { class: "cell-sub" }, j.kind === "start_engine" ? "engine start" : "benchmark"));
+      const w = workload(j);
+      tr.children[1].replaceChildren(h("div", {}, w.main), h("div", { class: "cell-sub" }, w.sub));
+      tr.children[2].replaceChildren(statusBadge(j.status));
+      tr.children[4].title = tr.children[4].textContent;  // full result / error on hover
+      if (ACTIVE(j.status) || j.status === "serving") {
+        const serving = j.status === "serving";
+        const b = h("button", { class: "danger sm" }, serving ? "Stop" : "Cancel");
+        b.addEventListener("click", async (ev) => {
+          ev.stopPropagation();
+          if (confirm(serving ? `Stop the engine started by job ${j.id}?` : `Cancel job ${j.id}?`)) { await api(`/api/jobs/${j.id}/cancel`, {}); refreshState(); }
+        });
+        tr.lastChild.replaceChildren(h("div", { class: "row-actions" }, b));
+      }
+    });
+    box.replaceChildren(t);
+  }
+  if (S.jobId && !S.es) selectJob(S.jobId);
+  else if (!S.jobId && jobs.length) selectJob(jobs[0].id);
+}
+
+const STATUS_TEXT = { queued: "Queued", running: "Starting", serving: "Serving", succeeded: "Succeeded", timeout: "Timed out",
+  stopped: "Stopped", failed: "Failed", cancelled: "Cancelled", interrupted: "Interrupted" };
+function statusBadge(st) {
+  return h("span", { class: `pill-status st-${st}` }, STATUS_TEXT[st] || st);
+}
+
+// ---------------------------------------------------------------- job status filter
+const JOB_FILTERS = [
+  ["all", "All", () => true],
+  ["active", "Active", (st) => st === "queued" || st === "running"],
+  ["serving", "Serving", (st) => st === "serving"],
+  ["succeeded", "Succeeded", (st) => st === "succeeded"],
+  ["timeout", "Timeout", (st) => st === "timeout"],
+  ["stopped", "Stopped", (st) => st === "stopped"],
+  ["failed", "Failed", (st) => st === "failed" || st === "interrupted"],
+  ["cancelled", "Cancelled", (st) => st === "cancelled"],
+];
+S.jobFilter = new URLSearchParams(location.search).get("status") || "all";
+function renderJobFilters(allJobs) {
+  const box = $("jobFilters");
+  box.replaceChildren();
+  for (const [key, label, match] of JOB_FILTERS) {
+    const n = allJobs.filter((j) => match(j.status)).length;
+    if (!n && key !== "all" && key !== S.jobFilter) continue;  // hide empty statuses, keep the current one
+    const b = h("button", { "aria-pressed": String(key === S.jobFilter), title: key === "failed" ? "failed or interrupted" : "" });
+    b.append(document.createTextNode(label), h("span", { class: "count" }, String(n)));
+    b.addEventListener("click", () => {
+      S.jobFilter = key;
+      const u = new URL(location.href);
+      key === "all" ? u.searchParams.delete("status") : u.searchParams.set("status", key);
+      history.replaceState(null, "", u);
+      refreshState();
+    });
+    box.appendChild(b);
+  }
+}
+
+// ---------------------------------------------------------------- live job view (SSE)
+const STEPS = {
+  start_engine: [["plan", "Planned"], ["sandbox", "GPU sandbox created"], ["container_started", "Container up"],
+    ["server_args", "Launcher imported"], ["dist_end", "NCCL ready"], ["load_end", "Weights loaded"],
+    ["prefill_graph_end", "Prefill graphs"], ["decode_graph_end", "Decode graphs"], ["fired_up", "Server up"],
+    ["ready", "Serving"]],
+  bench: [],
+};
+function selectJob(id) {
+  if (S.es) S.es.close();
+  S.jobId = id;
+  const u = new URL(location.href); u.searchParams.set("job", id); history.replaceState(null, "", u);
+  S.done = {};
+  S.t0 = null;
+  S.logLines = [];
+  S.trials = [];
+  $("jobLog").textContent = "";
+  $("steps").replaceChildren();
+  api(`/api/jobs/${id}`).then((j) => {
+    S.job = j;
+    $("jobTitle").textContent = `Job ${j.id} · ${j.kind.replace("_", " ")} · ${workload(j).main}`;
+    renderJobMeta();
+    S.es = new EventSource(`/api/jobs/${id}/stream`);
+    S.es.onmessage = (m) => onEvent(JSON.parse(m.data));
+    S.es.addEventListener("end", () => { S.es.close(); api(`/api/jobs/${id}`).then((jj) => { S.job = jj; renderJobMeta(); refreshState(); }); });
+  });
+  document.querySelectorAll("#jobs tbody tr").forEach((tr) => tr.classList.toggle("selected", tr.firstChild.textContent === id));
+}
+function renderJobMeta() {
+  const j = S.job;
+  const r = j.result || {};
+  const lifetime = j.status === "timeout" ? " · engine reached its lifetime cap"
+    : j.status === "stopped" ? " · engine stopped" : j.status === "serving" ? " · engine is serving" : "";
+  $("jobMeta").textContent = `${STATUS_TEXT[j.status] || j.status}${lifetime}` + (r.url ? ` · ${r.url} · ready ${r.startup_s ?? r.request_to_ready_s} s (predicted ${r.predicted_ready_s} s)`
+      + (r.scheduling_wait_s > 1 ? ` · ${fmt(r.scheduling_wait_s, 0)} s waiting for GPUs not counted` : "") : "")
+    + (j.error ? ` · ${j.error.slice(0, 160)}` : "");
+  $("btnCancel").hidden = !(ACTIVE(j.status) || j.status === "serving");
+  $("btnCancel").textContent = j.status === "serving" ? "Stop engine" : "Cancel job";
+}
+function onEvent(e) {
+  if (e.type === "log") {
+    S.logLines.push(e.line);
+    if (S.logLines.length > 400) S.logLines.shift();
+  } else {
+    const key = e.type === "phase" ? e.name : e.type;
+    S.t0 = S.t0 || S.job.started || e.ts;
+    if (!(key in S.done)) S.done[key] = e.ts - S.t0;  // one clock for everything: seconds since job start
+    const summary = e.type === "phase" ? `${e.name}${e.t != null ? ` @ ${fmt(e.t)} s` : ""}`
+      : e.type === "trial_done" ? `trial ${e.approach} r${e.rep}: ready ${fmt(e.ready_s)} s · hash ${e.correctness_hash}`
+      : e.type === "trial_failed" || e.type === "error" ? `!! ${e.error.slice(0, 300)}`
+      : e.type === "ready" ? `READY ${e.url} · ${e.startup_s ?? e.request_to_ready_s} s (predicted ${e.predicted_ready_s} s)` + (e.scheduling_wait_s > 1 ? ` · +${fmt(e.scheduling_wait_s, 0)} s GPU scheduling, not counted` : "")
+      : e.type === "plan" ? `plan: ready ~${fmt(e.plan.predicted_ready_s, 0)} s${e.replanned ? " (re-planned)" : ""}`
+      : e.type === "sandbox" ? `sandbox ${e.role} ${e.sandbox_id}`
+      : `[${e.type}]`;
+    S.logLines.push("» " + summary);
+    if (e.type === "trial_done" || e.type === "trial_failed") S.trials.push(e);
+  }
+  const el_ = $("jobLog");
+  const atBottom = el_.scrollTop + el_.clientHeight >= el_.scrollHeight - 10;
+  el_.textContent = S.logLines.join("\n");
+  if (atBottom) el_.scrollTop = el_.scrollHeight;
+  renderSteps();
+  if (["succeeded", "failed", "cancelled", "ready", "serving", "timeout", "stopped"].includes(e.type)) { api(`/api/jobs/${S.jobId}`).then((j) => { S.job = j; renderJobMeta(); }); }
+}
+// Where a start job's time went, on the job's own clock. Same five groups/colors as the
+// analysis dashboard; boundaries come from the engine's phase events.
+const GROUPS5 = ["Imports & process spawn", "CUDA / NCCL init", "Weight load", "CUDA graph capture", "Scheduling, container, init & warmup"];
+const PHASE_ORDER = ["plan", "sandbox", "container_started", "server_args", "dist_begin", "dist_end", "load_begin", "load_end",
+  "prefill_graph_begin", "prefill_graph_end", "decode_graph_begin", "decode_graph_end", "fired_up", "ready"];
+const PHASE_LABEL = { plan: "planned", sandbox: "GPU sandbox created", container_started: "container up", server_args: "launcher imported",
+  dist_begin: "NCCL init", dist_end: "NCCL ready", load_begin: "loading weights", load_end: "weights loaded",
+  prefill_graph_begin: "capturing prefill graphs", prefill_graph_end: "prefill graphs done", decode_graph_begin: "capturing decode graphs",
+  decode_graph_end: "decode graphs done", fired_up: "server up", ready: "serving" };
+function jobGroups(d) {
+  // d: milestone -> seconds since job start. Missing later milestones mean "still running".
+  const g = [0, 0, 0, 0, 0];
+  const span = (a, b) => (a in d && b in d ? Math.max(0, d[b] - d[a]) : 0);
+  g[4] += d.container_started ?? 0;                                   // queue, plan, sandbox, container start
+  g[0] += span("container_started", "dist_begin");                    // imports + TP worker spawn
+  g[1] += span("dist_begin", "dist_end");
+  g[4] += span("dist_end", "load_begin");                             // model construction
+  g[2] += span("load_begin", "load_end");
+  g[4] += span("load_end", "prefill_graph_begin");                    // KV cache
+  g[3] += span("prefill_graph_begin", "decode_graph_end");
+  g[4] += span("decode_graph_end", "ready");                          // warmup, first request, handoff
+  return g;
+}
+function renderSteps() {
+  const box = $("steps");
+  box.replaceChildren();
+  if (S.job?.kind !== "start_engine") {
+    const p = S.job?.params || {};
+    const total = (p.approaches || []).length * (p.reps || 1);
+    const div = h("div", { class: "steps" });
+    div.appendChild(h("div", { class: "step done" }, `Trials finished: ${S.trials.length} / ${total || "?"}`));
+    box.appendChild(div);
+    return;
+  }
+  const d = S.done, g = jobGroups(d);
+  const total = g.reduce((a, b) => a + b, 0);
+  const lastKey = [...PHASE_ORDER].reverse().find((k) => k in d);
+  const finished = "ready" in d;
+  const W = 640, H = 230, cx = 112, cy = 112, R = 100, r = 64;
+  const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, width: "100%", role: "img", "aria-label": "Where this job's time went" }, box);
+  if (total <= 0) {
+    el("circle", { cx, cy, r: (R + r) / 2, fill: "none", stroke: css("--surface-2"), "stroke-width": R - r }, svg);
+  } else {
+    let a0 = -Math.PI / 2;
+    g.forEach((v, i) => {
+      if (v <= 0) return;
+      const a1 = a0 + (v / total) * Math.PI * 2 - 1e-6;
+      const large = a1 - a0 > Math.PI ? 1 : 0;
+      const P = (rad, ang) => [cx + rad * Math.cos(ang), cy + rad * Math.sin(ang)];
+      const [x0, y0] = P(R, a0), [x1, y1] = P(R, a1), [x2, y2] = P(r, a1), [x3, y3] = P(r, a0);
+      const path = el("path", { d: `M${x0},${y0} A${R},${R} 0 ${large} 1 ${x1},${y1} L${x2},${y2} A${r},${r} 0 ${large} 0 ${x3},${y3} Z`,
+        fill: color(i), stroke: css("--surface-1"), "stroke-width": 2 }, svg);
+      hover(path, () => [GROUPS5[i], [{ value: `${fmt(v)} s`, name: `${fmt((100 * v) / total, 0)}% of ${fmt(total, 0)} s`, color: color(i) }]]);
+      a0 = a1 + 1e-6;
+    });
+  }
+  text(svg, cx, cy - 2, total > 0 ? `${fmt(total, 0)} s` : "—", { "text-anchor": "middle", class: "ink", "font-size": 24, "font-weight": 650 });
+  text(svg, cx, cy + 17, finished ? "request → serving" : S.job?.status === "running" ? "so far" : S.job?.status || "", { "text-anchor": "middle", class: "muted", "font-size": 11.5 });
+  // legend doubles as the value labels
+  GROUPS5.forEach((name, i) => {
+    const y = 30 + i * 36;
+    roundedBar(svg, 250, y - 9, 10, 10, color(i), { r: 3 });
+    text(svg, 268, y, name, { class: "ink", "font-size": 12.5 });
+    text(svg, 268, y + 16, total > 0 ? `${fmt(g[i])} s · ${fmt((100 * g[i]) / total, 0)}%` : "—", { "font-size": 12 });
+  });
+  const st = S.job?.status;
+  const status = finished && st !== "serving" ? `Engine ${STATUS_TEXT[st] || st} · it was ready ${fmt(d.ready, 1)} s after the job started`
+    : finished ? `Serving · ready ${fmt(d.ready, 1)} s after the job started`
+    : lastKey ? `In progress · last: ${PHASE_LABEL[lastKey] || lastKey} at ${fmt(d[lastKey], 1)} s` : "Waiting to start";
+  text(svg, 250, H - 12, status, { "font-size": 12, class: finished ? "ink" : "muted" });
+}
+
+
+
+
+refreshState();
+setInterval(refreshState, 5000);
+</script>
+</body>
+</html>

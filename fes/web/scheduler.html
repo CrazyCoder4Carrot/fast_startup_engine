@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Engines · control plane — fast engine startup</title>
+<link rel="stylesheet" href="/viz.css">
+<style>
+.launch-grid { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 20px; }
+@media (max-width: 1000px) { .launch-grid { grid-template-columns: 1fr; } }
+.form { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px 16px; align-content: start; }
+.form .wide { grid-column: 1 / -1; }
+.form .half { grid-column: span 2; }
+.field { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.field label { font-size: 11.5px; font-weight: 600; color: var(--text-secondary); letter-spacing: .01em; }
+.field .hint { font-size: 11.5px; color: var(--text-muted); }
+.field select, .field input { width: 100%; height: 34px; font: inherit; font-size: 13px; background: var(--surface-1); color: var(--text-primary);
+  border: 1px solid var(--border); border-radius: 8px; padding: 0 10px; }
+details.advanced { border-top: 1px solid var(--border); padding-top: 10px; }
+details.advanced summary { cursor: pointer; font-size: 12.5px; color: var(--text-secondary); font-weight: 600; }
+.adv-grid { display: grid; grid-template-columns: 3fr 1fr; gap: 14px 16px; margin-top: 12px; }
+.predict { border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; background: var(--surface-0);
+  display: flex; flex-direction: column; gap: 10px; }
+.predict-label { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--text-muted); font-weight: 600; }
+.predict-main { font-size: 34px; font-weight: 680; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; line-height: 1; }
+.predict-main small { font-size: 13px; font-weight: 500; color: var(--text-secondary); margin-left: 6px; letter-spacing: 0; }
+.predict dl { margin: 0; display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.predict dt { font-size: 11px; color: var(--text-muted); }
+.predict dd { margin: 2px 0 0; font-weight: 600; font-size: 13.5px; font-variant-numeric: tabular-nums; }
+.flags { display: flex; flex-wrap: wrap; gap: 5px; }
+.flag { font-size: 11.5px; padding: 2px 8px; border-radius: 6px; background: var(--surface-2); color: var(--text-secondary); }
+.flag.on { color: var(--good-text); background: color-mix(in srgb, var(--good-text) 11%, transparent); }
+.flag.off { color: var(--critical-text); background: color-mix(in srgb, var(--critical-text) 9%, transparent); }
+button.block { width: 100%; height: 38px; font-size: 14px; }
+.msg { font-size: 12.5px; color: var(--text-secondary); min-height: 17px; }
+.split { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: 16px; align-items: start; }
+@media (max-width: 1100px) { .split { grid-template-columns: 1fr; } }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 10px; }
+.chips button { font-size: 12px; padding: 3px 10px; border-radius: 999px; }
+.chips button[aria-pressed="true"] { background: var(--text-primary); color: var(--surface-1); border-color: var(--text-primary); }
+.chips .count { color: var(--text-muted); margin-left: 5px; font-variant-numeric: tabular-nums; }
+.chips button[aria-pressed="true"] .count { color: var(--surface-2); }
+tr.selected td { background: var(--surface-2); }
+tr.selected td:first-child { box-shadow: inset 3px 0 0 var(--text-primary); }
+table.data td .mono, table.data td > div:first-child { white-space: nowrap; }
+tbody tr.clickable { cursor: pointer; }
+.cell-sub { font-size: 11.5px; color: var(--text-muted); margin-top: 1px; }
+.life { display: flex; align-items: center; gap: 8px; }
+.life .track { width: 90px; height: 6px; border-radius: 3px; background: var(--surface-2); overflow: hidden; flex: none; }
+.life .fill { height: 100%; background: var(--good-text); border-radius: 3px; }
+.life .fill.low { background: var(--critical-text); }
+.row-actions { display: flex; gap: 6px; justify-content: flex-end; }
+pre.joblog { margin: 10px 0 0; max-height: 320px; overflow: auto; font: 11.5px/1.5 ui-monospace, Menlo, monospace; white-space: pre-wrap;
+  word-break: break-all; color: var(--text-secondary); background: var(--surface-0); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
+.play-controls { display: grid; grid-template-columns: 2fr 1fr 110px 110px auto; gap: 12px; align-items: end; margin-bottom: 10px; }
+textarea#prompt { width: 100%; min-height: 80px; resize: vertical; font: 13.5px/1.5 inherit; font-family: inherit; background: var(--surface-1);
+  color: var(--text-primary); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; }
+.send-row { display: flex; gap: 12px; align-items: center; margin-top: 8px; }
+.chat { display: flex; flex-direction: column; gap: 10px; margin-top: 12px; max-height: 460px; overflow: auto; }
+.turn { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; background: var(--surface-1); }
+.turn.user { background: var(--surface-0); }
+.turn .who { font-size: 11px; color: var(--text-muted); margin-bottom: 4px; text-transform: uppercase; letter-spacing: .05em; font-weight: 600; }
+.turn .body { white-space: pre-wrap; word-break: break-word; font-size: 13.5px; }
+.turn .stats { font-size: 11.5px; color: var(--text-muted); margin-top: 6px; font-variant-numeric: tabular-nums; }
+.empty { color: var(--text-muted); padding: 22px; text-align: center; font-size: 13px; }
+</style>
+</head>
+<body>
+<div class="viz-root console" id="app">
+  <header class="appbar">
+    <div class="brand"><span class="logo">FS</span><div><div class="product">Fast Engine Startup</div><div class="env">Control plane · Modal · SGLang v0.5.20</div></div></div>
+    <nav class="topnav">
+      <a href="/" aria-current="page">Engines</a>
+      <a href="/jobs">Jobs</a>
+      <a href="/playground">Playground</a>
+      <a href="/catalog">Catalog</a>
+      <a href="/compare">Compare</a>
+      <a href="/analysis">Analysis</a>
+    </nav>
+    <div class="appbar-right">
+      <span class="meta" id="health"></span>
+      <span class="pill" id="busy">Idle</span>
+      <button id="btnReconcile" class="ghost sm" title="Re-scan the volumes and register artifacts that exist there">Reconcile catalog</button>
+      <button id="btnBench" class="ghost sm" title="One cold-start trial each of baseline and jit_cache in fresh sandboxes">Run benchmark</button>
+    </div>
+  </header>
+
+  <main class="page">
+    <section class="panel">
+      <div class="panel-head"><div><h2>Launch engine</h2>
+        <p class="sub">Planned from the live artifact catalog. GPUs are claimed only after CPU-side preparation.</p></div></div>
+      <div class="launch-grid">
+        <div class="form">
+          <div class="field half"><label for="model" title="Model and hardware. The 4×H100 workload runs two TP=2 engines on one host (group A: GPU 0-1, group B: GPU 2-3); they share its weight prefetch, compile cache and import prefetch.">Workload</label>
+            <select id="model">
+              <option value="30b-2xh100" data-model="Qwen/Qwen3-30B-A3B-Instruct-2507" data-gpu="H100!:2" data-tp="2" data-groups="1" data-price="3.95" data-min-ttl="300">Qwen3-30B · 2×H100 · 1 engine (TP=2)</option>
+              <option value="30b-4xh100" data-model="Qwen/Qwen3-30B-A3B-Instruct-2507" data-gpu="H100!:4" data-tp="2" data-groups="2" data-price="3.95" data-min-ttl="300">Qwen3-30B · 4×H100 · 2 engines (A: GPU 0-1 · B: GPU 2-3)</option>
+              <option value="235b-8xb200" data-model="Qwen/Qwen3-235B-A22B-Instruct-2507" data-gpu="B200:8" data-tp="8" data-groups="1" data-price="6.25" data-min-ttl="900">Qwen3-235B · 8×B200 · 1 engine (TP=8)</option>
+            </select></div>
+          <div class="field"><label for="graphs" title="pow2: 9 decode + 12 prefill sizes (capture ~9.6 s, serving within 2%). full: SGLang's 94 sizes (~27 s).">CUDA graphs</label>
+            <select id="graphs"><option value="pow2" selected>pow2 · fast start</option><option value="full">full · 94 sizes</option></select></div>
+          <div class="field"><label for="loader" title="ModelExpress (github.com/ai-dynamo/modelexpress) loads weights through its model_streamer; its GPU-to-GPU transfer can't run on Modal, so it always falls back to that.">Weight loader</label>
+            <select id="loader"><option value="default" selected>SGLang default</option><option value="modelexpress">ModelExpress</option></select></div>
+          <div class="field"><label for="ttl">Lifetime</label>
+            <select id="ttl" title="Counts from container start, so it includes startup (30B ~90 s, 235B ~11 min). Minimum per model: 30B 5 min, 235B 15 min."><option value="300" selected>5 min</option><option value="600">10 min</option><option value="900">15 min</option><option value="1800">30 min</option><option value="3600">60 min</option></select></div>
+          <div class="field half"><label for="policy" title="late_claim: prepare on CPU, then claim GPUs. asap: claim GPUs immediately.">GPU claim policy</label>
+            <select id="policy"><option value="late_claim">late_claim · prepare on CPU first</option><option value="asap">asap · claim GPUs immediately</option></select></div>
+          <details class="advanced wide"><summary>Advanced</summary>
+            <div class="adv-grid">
+              <div class="field"><label for="extra">Extra SGLang flags</label><input type="text" id="extra" placeholder="e.g. --cuda-graph-max-bs-decode 16"></div>
+              <div class="field"><label for="price" title="Check current Modal pricing">$ / GPU-hour</label><input type="number" id="price" value="3.95" step="0.05" min="0"></div>
+            </div>
+          </details>
+        </div>
+        <aside class="predict" aria-live="polite">
+          <div class="predict-label">Predicted</div>
+          <div class="predict-main"><span id="predReady">—</span><small>s to ready</small></div>
+          <dl>
+            <div><dt>GPU billed</dt><dd id="predGpu">—</dd></div>
+            <div><dt>Cost to ready</dt><dd id="predCost">—</dd></div>
+            <div><dt>CPU prep</dt><dd id="predCpu">—</dd></div>
+          </dl>
+          <div class="flags" id="predFlags"></div>
+          <button id="btnStart" class="primary block">Start engine</button>
+          <div class="msg" id="msg"></div>
+        </aside>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head"><div><h2>Engines</h2><p class="sub">Serving engines stop automatically at their lifetime cap. Start-up history and live progress are on the <a href="/jobs">Jobs</a> page.</p></div></div>
+      <div id="engines"></div>
+    </section>
+
+  </main>
+  <div class="tip" id="tip" role="status" aria-live="polite"></div>
+</div>
+
+<script src="/viz.js"></script>
+<script>
+"use strict";
+const S = { cmp: null, view: "ready", jobId: null, poll: null, plan: null };
+const price = () => Math.max(0, parseFloat($("price").value) || 0);
+function selectedModel() {
+  const o = $("model").selectedOptions[0], [base, n] = o.dataset.gpu.split(":");
+  return { model: o.dataset.model, gpu: o.dataset.gpu, tp: +o.dataset.tp, groups: +o.dataset.groups, gpus: +n, gpuType: base.replace("!", "") };
+}
+const dollars = (gpuSeconds) => `$${((gpuSeconds / 3600) * selectedModel().gpus * price()).toFixed(2)}`;
+const shortModel = (m) => (m || "Qwen/Qwen3-30B-A3B-Instruct-2507").split("/").pop().replace("-Instruct-2507", "");
+["policy", "ttl", "graphs", "loader"].forEach((id) => $(id).addEventListener("change", () => doPlan()));
+$("extra").addEventListener("change", () => doPlan());
+// Each model has its own shortest lifetime (the cap includes startup): shorter options are disabled
+// and the selection moves to the model's minimum.
+function applyMinTtl() {
+  const min = +$("model").selectedOptions[0].dataset.minTtl;
+  for (const o of $("ttl").options) o.disabled = +o.value < min;
+  $("ttl").value = String(min);
+}
+applyMinTtl();
+$("model").addEventListener("change", () => {
+  $("price").value = $("model").selectedOptions[0].dataset.price;  // default list price per GPU type; editable
+  applyMinTtl();
+  S.plan = null;
+  doPlan();
+});
+const msg = (t) => ($("msg").textContent = t);
+async function api(path, body) {
+  const r = await fetch(path, body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const d = await r.json();
+  if (!r.ok) throw new Error(d.error || r.statusText);
+  return d;
+}
+
+// ---------------------------------------------------------------- actions
+function renderPrediction() {
+  const p = S.plan;
+  if (!p) return;
+  $("predReady").textContent = fmt(p.predicted_ready_s, 0);
+  $("predGpu").textContent = `${fmt(p.predicted_gpu_s, 0)} s`;
+  $("predCost").textContent = dollars(p.predicted_gpu_s);
+  $("predCpu").textContent = p.predicted_cpu_s > 0 ? `${fmt(p.predicted_cpu_s / 60, 0)} min` : "none";
+  const g = (p.request.extra_args || []).some((a) => a.startsWith("--cuda-graph") || a.startsWith("--disable-")) ? "custom" : p.request.graph_sizes;
+  const flags = [
+    [p.weights_on_volume ? "weights staged" : "weights: download first", p.weights_on_volume],
+    [p.compile_hit ? "compile cache hit" : "compile cache miss", p.compile_hit],
+    [p.prefetch ? "prefetch on" : "prefetch off: too big for host RAM", p.prefetch],
+    [`RAM ${fmt(p.memory_mib / 1024, 0)} GiB reserved`, true],
+    [`graphs: ${g}`, g === "pow2"],
+    [p.request.modelexpress ? "loader: ModelExpress" : "loader: SGLang", true],
+  ];
+  $("predFlags").replaceChildren(...flags.map(([t, ok]) => h("span", { class: "flag " + (ok ? "on" : "off"), title: t }, t)));
+}
+async function doPlan() {
+  try {
+    const m = selectedModel();
+    const q = new URLSearchParams({ policy: $("policy").value, ttl: $("ttl").value, extra: $("extra").value, model: m.model, tp: m.tp, gpu: m.gpu,
+      groups: m.groups, graph_sizes: $("graphs").value, modelexpress: $("loader").value === "modelexpress" });
+    S.plan = await api("/api/plan?" + q);
+    renderPrediction();
+    msg("");
+  } catch (e) { msg("Plan failed: " + e.message); }
+}
+$("btnStart").addEventListener("click", async () => {
+  if (!S.plan) await doPlan();
+  const ttl = +$("ttl").value, m = selectedModel(), p = S.plan;
+  const prep = p.weights_on_volume ? "" : `\n\nWeights are not downloaded yet: ${fmt(p.weights_bytes / 1e9, 0)} GB first go to the volume on a CPU worker (~${fmt(p.predicted_cpu_s / 60, 0)} min, no GPU billed).`;
+  const what = m.groups > 1 ? `${m.groups} engines of ${shortModel(m.model)} on one ${m.gpus}×${m.gpuType} host (A: GPU 0-1, B: GPU 2-3, TP=${m.tp} each)`
+    : `${shortModel(m.model)} on ${m.gpus}×${m.gpuType} (TP=${m.tp})`;
+  if (!confirm(`Start ${what}?${prep}\n\n`
+    + `Predicted ~${fmt(p.predicted_gpu_s, 0)} s of GPU until ready (${dollars(p.predicted_gpu_s)}); `
+    + `up to ${dollars(ttl)} if it runs to its ${ttl / 60}-minute cap. Stop it from the Engines panel when done.`)) return;
+  submit("start_engine", { model: m.model, tp: m.tp, gpu: m.gpu, groups: m.groups, policy: $("policy").value, ttl_s: ttl, graph_sizes: $("graphs").value,
+    modelexpress: $("loader").value === "modelexpress",
+    extra_args: $("extra").value.split(/\s+/).filter(Boolean) });
+});
+$("btnBench").addEventListener("click", () => {
+  const reps = 1;  // one trial per approach from the UI; use `fes-bench -n N` for repeated trials
+  const trials = 2 * reps, estS = trials * 330;
+  if (!confirm(`Run ${trials} cold-start trials (baseline + jit_cache, one each) in fresh 2×H100 sandboxes?\n\n`
+    + `Roughly ${fmt(estS / 60, 0)} min and ${dollars(estS)} of GPU. Trials run one at a time.`)) return;
+  submit("bench", { approaches: ["baseline", "jit_cache"], reps });
+});
+$("btnReconcile").addEventListener("click", async () => {
+  msg("Reconciling catalog with volumes…");
+  try { const d = await api("/api/catalog/reconcile", {}); msg(`Catalog has ${Object.keys(d.artifacts).length} artifacts.`); refreshState(); }
+  catch (e) { msg("Reconcile failed: " + e.message); }
+});
+async function submit(kind, params) {
+  try {
+    const j = await api("/api/jobs", { kind, params });
+    const a = h("a", { href: `/jobs?job=${j.id}` }, `Follow job ${j.id} →`);
+    $("msg").replaceChildren(document.createTextNode(`Queued ${kind === "bench" ? "benchmark" : "engine start"}. `), a);
+    refreshState();
+  } catch (e) { msg("Could not submit: " + e.message); }
+}
+async function stopEngine(id) {
+  if (!confirm(`Stop engine ${id}?`)) return;
+  try { await api(`/api/engines/${id}/stop`, {}); msg(`Stopped ${id}.`); refreshState(); }
+  catch (e) { msg("Stop failed: " + e.message); }
+}
+
+// ---------------------------------------------------------------- state: health, jobs, engines
+const ACTIVE = (st) => st === "queued" || st === "running";
+async function refreshState() {
+  const [health, engines] = await Promise.all([api("/api/health"), api("/api/engines")]);
+  const busy = health.running + health.queued > 0;
+  $("busy").textContent = busy ? `${health.running} running · ${health.queued} queued` : "Idle";
+  $("busy").classList.toggle("busy", busy);
+  $("health").textContent = `Uptime ${fmt(health.uptime_s / 60, 0)} min · reconciler ${health.reconciler.at ? "healthy" : "starting"}`;
+
+  const E = Object.entries(engines);
+  const eb = $("engines");
+  if (!E.length) { eb.replaceChildren(h("div", { class: "empty" }, "No engines running. Launch one above.")); return; }
+  const et = table(["Engine", "Model", "Status", "Lifetime", "Endpoint", ""], E.map(() => ["", "", "", "", "", ""]));
+  et.classList.add("data");
+  et.querySelectorAll("tbody tr").forEach((tr, i) => {
+    const [id, e] = E[i];
+    const gpu = (e.gpu || "H100!:2").replace("!", "");
+    tr.children[0].replaceChildren(h("div", { class: "mono" }, id), h("div", { class: "cell-sub" }, e.job_id ? `job ${e.job_id}` : ""));
+    const hw = e.group ? `group ${e.group.toUpperCase()} · GPU ${e.devices.replace(",", "-")} of ${gpu.split(":")[1]}×${gpu.split(":")[0]} · TP=${e.tp}`
+      : `${gpu.split(":")[1]}×${gpu.split(":")[0]} · TP=${e.tp}`;
+    tr.children[1].replaceChildren(h("div", {}, shortModel(e.model)), h("div", { class: "cell-sub" }, hw));
+    tr.children[2].replaceChildren(statusBadge(e.live === false ? "stopped" : "serving"));
+    const left = e.expires_at ? Math.max(0, e.expires_at - Date.now() / 1000) : null;
+    const frac = left != null && e.ttl_s ? Math.min(1, left / e.ttl_s) : 0;
+    const bar = h("div", { class: "life" });
+    const track = h("div", { class: "track" }), fill = h("div", { class: "fill" + (frac < 0.2 ? " low" : "") });
+    fill.style.width = `${(100 * frac).toFixed(0)}%`;
+    track.appendChild(fill);
+    bar.append(track, h("span", { class: "cell-sub" }, left != null ? `${fmt(left / 60, 0)} min left` : "—"));
+    tr.children[3].replaceChildren(bar);
+    tr.children[4].replaceChildren(h("a", { href: e.url + "/get_model_info", target: "_blank", rel: "noopener", class: "mono", title: e.url },
+      e.url.replace("https://", "").slice(0, 28) + "… ↗"));
+    const tryB = h("button", { class: "sm" }, "Try");
+    tryB.addEventListener("click", () => { location.href = `/playground?engine=${encodeURIComponent(id)}`; });
+    const stopB = h("button", { class: "danger sm" }, "Stop");
+    stopB.addEventListener("click", () => stopEngine(id));
+    tr.lastChild.replaceChildren(h("div", { class: "row-actions" }, tryB, stopB));
+  });
+  eb.replaceChildren(et);
+}
+
+const STATUS_TEXT = { queued: "Queued", running: "Starting", serving: "Serving", succeeded: "Succeeded", timeout: "Timed out",
+  stopped: "Stopped", failed: "Failed", cancelled: "Cancelled", interrupted: "Interrupted" };
+function statusBadge(st) {
+  return h("span", { class: `pill-status st-${st}` }, STATUS_TEXT[st] || st);
+}
+
+
+refreshState();
+doPlan();
+setInterval(refreshState, 5000);
+</script>
+</body>
+</html>
