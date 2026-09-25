@@ -43,6 +43,69 @@ def bars(title: str, only_first: bool = False, rename: dict | None = None) -> st
 
 RESULTS_LABELS = {"Vanilla": "Baseline"}
 
+STAGE_FIX = ["bytecode, import prefetch", "compile cache", "prefetch into RAM", "compile cache + pow2", "compile cache"]
+STAGE_NAME = ["Imports + spawn", "CUDA / NCCL init", "Weight load", "CUDA graphs", "Other (KV, warmup)"]
+
+
+def stage_table(title: str, base_total: float, now_total: float, cost: str, pct: bool = False) -> str:
+    """Stage-by-stage baseline vs now for one workload, plus the time outside SGLang's phases."""
+    (_, base, _), (_, now, _) = BARS[title]
+    rows = [(STAGE_NAME[i], b, n, STAGE_FIX[i]) for i, (b, n) in enumerate(zip(base, now))]
+    rows.append(("Outside the phases", base_total - sum(base), now_total - sum(now), "container start, first request"))
+    def change(b, n):  # now - baseline: negative = faster; pct: relative to the baseline stage
+        d = n - b
+        cls = "good" if d < -0.5 else ("bad" if d > 0.5 else "")
+        sign = "−" if d < 0 else "+"
+        if pct and b >= 2:  # a percentage of a ~1 s baseline would mean nothing
+            return f'<td class="{cls}">{sign}{abs(100 * d / b):.0f}%</td>'
+        return f'<td class="{cls}">{sign}{abs(d):.1f} s</td>'
+    tr = "".join(f"<tr><td>{name}</td><td>{b:.1f} s</td><td>{n:.1f} s</td>{change(b, n)}<td>{fix}</td></tr>"
+                 for name, b, n, fix in rows)
+    total = (f"−{100 * (1 - now_total / base_total):.0f}% ({base_total / now_total:.1f}×)" if pct
+             else f"{base_total / now_total:.1f}× faster")
+    return (f'<table class="plain compact stage"><tr><th>Stage</th><th>Baseline</th><th>Now</th><th>Change</th><th>What changed</th></tr>{tr}'
+            f'<tr class="tot"><td>Startup</td><td>{base_total:.1f} s</td><td>{now_total:.1f} s</td><td>{total}</td>'
+            f'<td>GPU cost per start {cost}</td></tr></table>')
+
+
+
+def phase_savings(title: str, base_total: float, now_total: float) -> str:
+    """Savings by phase, as on the Compare page: baseline (grey) and now (blue) bars per phase,
+    the change on the right, and startup as the last row."""
+    (_, base, _), (_, now, _) = BARS[title]
+    rows = [(STAGE_NAME[i], STAGE_FIX[i], b, n) for i, (b, n) in enumerate(zip(base, now))]
+    rows.append(("Startup", "", base_total, now_total))
+    W, left, right, rh, gi, go, top = 1000, 190, 235, 13, 3, 15, 4
+    H = top + len(rows) * (2 * rh + gi + go) + 20
+    xmax = max(base_total, now_total) * 1.02
+    step = next(t for t in (10, 20, 25, 50, 100, 200, 250) if xmax / t <= 6)
+    x = lambda v: left + v / xmax * (W - left - right)
+    out = [f'<svg class="savings" viewBox="0 0 {W} {H}" role="img">']
+    for t in range(0, int(xmax) + 1, step):
+        out.append(f'<line x1="{x(t):.1f}" x2="{x(t):.1f}" y1="{top}" y2="{H - 18}" class="grid"/>'
+                   f'<text x="{x(t):.1f}" y="{H - 4}" class="tick">{t}s</text>')
+    y = top
+    for name, fix, b, n in rows:
+        total = name == "Startup"
+        out.append(f'<text x="{left - 12}" y="{y + rh + (0 if fix else 4)}" class="lab{" tot" if total else ""}">{name}</text>')
+        if fix:
+            out.append(f'<text x="{left - 12}" y="{y + rh + 15}" class="fix">{fix}</text>')
+        for v, cls in ((b, "base"), (n, "now")):
+            out.append(f'<rect x="{left}" y="{y}" width="{max(x(v) - left, 1.5):.1f}" height="{rh}" rx="3" class="{cls}"/>'
+                       f'<text x="{x(v) + 6:.1f}" y="{y + rh - 2.5}" class="val">{v:.1f} s</text>')
+            y += rh + gi
+        d = n - b
+        cls = "good" if d < -0.5 else ("bad" if d > 0.5 else "flat")
+        out.append(f'<text x="{W - 2}" y="{y - rh - gi / 2 - 1}" class="delta {cls}" text-anchor="end">'
+                   f'{"−" if d < 0 else "+"}{abs(d):.1f} s ({"−" if d < 0 else "+"}{abs(100 * d / b):.0f}%)</text>')
+        y += go - gi
+    out.append("</svg>")
+    return "".join(out)
+
+
+SIDES_LEGEND = '<div class="legend sides"><span><i class="lb"></i>Baseline</span><span><i class="ln"></i>Now</span></div>'
+
+
 LEGEND = '<div class="legend">' + "".join(
     f'<span><i style="background:{c}"></i>{p}</span>' for p, c in zip(PHASES, COLORS)) + "</div>"
 
@@ -143,6 +206,36 @@ def sequence(lanes: list[tuple[str, str, str]], events: list[tuple], height: int
     return "".join(out)
 
 
+
+def prefetch_diagram() -> str:
+    """Weight prefetch: each thread reads one whole shard file from the volume into the page cache."""
+    rows = [("model-00001", "thread 1"), ("model-00002", "thread 2"), ("model-00003", "thread 3"),
+            ("…", "…"), ("model-00016", "thread 16")]
+    W, top, rh, gap = 620, 76, 40, 16
+    H = top + len(rows) * (rh + gap) + 6
+    out = [f'<svg class="pfd" viewBox="0 0 {W} {H}" role="img">',
+           '<defs><marker id="pfa" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">'
+           '<path d="M0,0 L10,5 L0,10 z" fill="#64748b"/></marker></defs>',
+           '<text x="80" y="22" class="hd">Network volume</text><text x="80" y="40" class="sub">16 shard files</text>',
+           '<text x="300" y="22" class="hd">16 threads</text><text x="300" y="40" class="sub">one file each, in parallel</text>',
+           f'<text x="530" y="22" class="hd">Page cache (RAM)</text>',
+           f'<rect x="450" y="{top}" width="162" height="{H - top - 6}" rx="10" class="ram"/>']
+    for i, (f, t) in enumerate(rows):
+        y = top + i * (rh + gap)
+        dots = f == "…"
+        if dots:
+            out.append(f'<text x="80" y="{y + rh / 2 + 5}" class="dots">⋮</text><text x="300" y="{y + rh / 2 + 5}" class="dots">⋮</text>'
+                       f'<text x="531" y="{y + rh / 2 + 5}" class="dots">⋮</text>')
+            continue
+        out.append(f'<rect x="6" y="{y}" width="148" height="{rh}" rx="7" class="file"/><text x="80" y="{y + rh / 2 + 5}" class="ft">{f}</text>'
+                   f'<rect x="240" y="{y}" width="120" height="{rh}" rx="20" class="thr"/><text x="300" y="{y + rh / 2 + 5}" class="tt">{t}</text>'
+                   f'<rect x="462" y="{y + 4}" width="138" height="{rh - 8}" rx="5" class="pg"/><text x="531" y="{y + rh / 2 + 5}" class="pt">{f}</text>'
+                   f'<line x1="158" y1="{y + rh / 2}" x2="234" y2="{y + rh / 2}" class="ar" marker-end="url(#pfa)"/>'
+                   f'<line x1="364" y1="{y + rh / 2}" x2="456" y2="{y + rh / 2}" class="ar" marker-end="url(#pfa)"/>')
+    out.append(f'<text x="197" y="{top - 8}" class="lb">read</text><text x="410" y="{top - 8}" class="lb">16 MB chunks</text></svg>')
+    return "".join(out)
+
+
 def component(title: str, what: str, how: list[str], side: str) -> str:
     """Architecture detail slide: what the part does, how it works, one key fact on the side."""
     li = "".join(f"<li>{x}</li>" for x in how)
@@ -232,9 +325,9 @@ SLIDES = [
              "16 threads read all shards into RAM while SGLang is still importing.",
              ["Faster SGLang init: weight load 62&nbsp;→&nbsp;13&nbsp;s (30B), 564&nbsp;→&nbsp;75&nbsp;s (235B)"],
              ["Needs a larger-memory host: about 2× the weights (235B: 940 GiB)"],
-             '<div class="panel blue"><h4>Before</h4><p>SGLang reads from the volume on demand, ~1&nbsp;GB/s</p></div>'
-             '<div class="panel green"><h4>Now</h4><p>Parallel read into RAM during imports: ~2 GB/s median (30B), 4.2 GB/s (235B)</p></div>'
-             '<p class="small">The drop combines faster parallel reads and overlap with imports. The 13 s left is the RAM → GPU copy.</p>', label="Weights"),
+             prefetch_diagram()
+             + '<p class="small">Before: SGLang reads the shards on demand, ~1&nbsp;GB/s. Now: ~2&nbsp;GB/s median (30B), 4.2&nbsp;GB/s (235B). '
+             'Models with more shards: a thread takes the next file when it finishes.</p>', label="Weights"),
     f"""<section data-label="Weights">
   <h2>Why prefetch helps</h2>
   {timeline([
@@ -413,57 +506,8 @@ python -m compileall -q -j 0 /opt/sglang/lib/python3.12/site-packages /sgl-works
   </div>
   <p class="small">Qwen3-30B, full CUDA graphs. Also saves ~9 s of warmup. Reused by any start with the same SGLang version, GPU, TP and model config.</p>
 </section>""",
-    """<section data-label="GPU allocation">
-  <h2>Sized per model</h2>
-  <table class="plain">
-    <tr><th>Setting</th><th>Rule</th><th>Why</th></tr>
-    <tr><td>Host RAM</td><td>2× weights + 64 GiB</td><td>Room for the prefetched weights</td></tr>
-    <tr><td>CPUs</td><td>4 per GPU</td><td>Enough cores for TP workers and prefetch</td></tr>
-    <tr><td>Prefetch threads</td><td>2× CPUs</td><td>More threads gave no gain</td></tr>
-    <tr><td>Minimum lifetime</td><td>235B: 15 min</td><td>Engine is not stopped mid-load</td></tr>
-  </table>
-</section>""",
-    proscons("GPU sharing: two engines on one host",
-             "Run two TP=2 engines of Qwen3-30B on one 4×H100 host.",
-             ["Weights, cache and imports prefetched once for both", "Weight load: 49 s → 14 s", "CUDA graphs: 68 s → 10 s"],
-             ["Only 1.4×: both engines import at once, so imports take ~84 s", "Only 2 trials so far"],
-             '<table class="plain"><tr><th>Both ready</th><th>Vanilla</th><th>Now</th></tr>'
-             '<tr><td>Startup</td><td>223.9 s</td><td>155.5 s</td></tr>'
-             '<tr><td>GPU cost</td><td>$0.98</td><td>$0.53</td></tr></table>'
-             '<div class="panel blue" style="margin-top:.9em"><h4>Next</h4><p>Stagger the two launches</p></div>', label="GPU sharing"),
-    """<section data-label="Summary">
-  <h2>Before and after, by phase</h2>
-  <table class="plain">
-    <tr><th>Phase (Qwen3-30B, 2×H100)</th><th>Before</th><th>Now</th></tr>
-    <tr><td>Imports + spawn</td><td>58 s</td><td>48 s</td></tr>
-    <tr><td>NCCL init</td><td>19 s</td><td>1 s</td></tr>
-    <tr><td>Weight load</td><td>62 s</td><td>13 s</td></tr>
-    <tr><td>CUDA graphs</td><td>72 s</td><td>9 s</td></tr>
-    <tr><td>Other</td><td>19 s</td><td>8 s</td></tr>
-  </table>
-</section>""",
     # ---------------------------------------------------------------- 5. make it work, then make it reliable
     section("5 · Make it work, then make it reliable"),
-    """<section>
-  <h2>Control plane evolution</h2>
-  <div class="steps">
-    <div class="step"><div class="n">1</div><h4>Scripts</h4><p>One script per experiment.</p><p class="lim">No shared state</p></div>
-    <div class="step"><div class="n">2</div><h4>JSON file</h4><p>Catalog of cached artifacts. In-memory queue.</p><p class="lim">Restart lost running jobs</p></div>
-    <div class="step"><div class="n">3</div><h4>SQLite</h4><p>Queue in the database. API and worker split.</p><p class="lim">One machine, one writer</p></div>
-    <div class="step"><div class="n">4</div><h4>Postgres in Docker</h4><p>Concurrent workers on any host.</p><p class="lim">API and worker in containers</p></div>
-  </div>
-</section>""",
-    """<section>
-  <h2>Issues found and fixed</h2>
-  <table class="plain">
-    <tr><th>Issue</th><th>Fix</th></tr>
-    <tr><td>Service restart interrupted running jobs</td><td>Database queue; separate API and worker</td></tr>
-    <tr><td>Partial download marked complete</td><td>Verify every shard</td></tr>
-    <tr><td>235B engine stopped mid-load</td><td>Minimum lifetime per model</td></tr>
-    <tr><td>Models shared one volume</td><td>One volume per model</td></tr>
-    <tr><td>Phases timed on the fastest GPU</td><td>Time on the slowest GPU</td></tr>
-  </table>
-</section>""",
     """<section class="arch-slide" data-label="Architecture">
   <h2>Architecture</h2>
   <div class="lane local"><h4>Local control plane</h4>
@@ -481,7 +525,7 @@ python -m compileall -q -j 0 /opt/sglang/lib/python3.12/site-packages /sgl-works
       <div class="box key wide"><b>GPU engine</b><span>at once: prefetch weights into RAM · restore compiled kernels · start SGLang</span></div>
       <div class="arr">←<small>mount</small></div>
       <div class="box"><b>Volumes</b><span>weights + compile cache, one set per model</span></div><div class="arr">←</div>
-      <div class="box"><b>CPU prep</b><span>downloads weights, no GPU billed</span></div>
+      <div class="box"><b>CPU prep</b><span>only on a weights cache miss: downloads them, no GPU billed</span></div>
     </div>
   </div>
 </section>""",
@@ -495,59 +539,25 @@ python -m compileall -q -j 0 /opt/sglang/lib/python3.12/site-packages /sgl-works
               '<div class="panel blue"><h4>Queue = a Postgres table</h4><p>Workers claim the oldest queued row with '
               '<code>FOR UPDATE SKIP LOCKED</code>, so two workers never get the same job.</p></div>'
               '<div class="panel green"><h4>Job states</h4><p>queued → running → serving → stopped · timeout · failed</p></div>'),
-    component("Worker + scheduler",
-              "Claims a job, plans the start, then runs the plan.",
-              ["<b>Plan:</b> look up weights and compile cache in the catalog",
-               "Size RAM and CPUs from the checkpoint; estimate every step",
-               "<b>Execute:</b> CPU prep if weights are missing, then the GPU sandbox",
-               "Heartbeat every 5 s; a job silent for 30 s is reaped",
-               "Reconciler every 30 s: drops exited engines, stops expired ones"],
-              '<table class="plain"><tr><th>Plan step (30B, cache hit)</th><th>Estimate</th></tr>'
-              '<tr><td>Claim GPU + container</td><td>~14 s</td></tr>'
-              '<tr><td>Restore cache, prefetch</td><td>0 s (parallel)</td></tr>'
-              '<tr><td>Imports, init, load, graphs</td><td>learned per model</td></tr></table>'
-              '<p class="small">235B: predicted 219.5 s, actual 220.8 s.</p>'),
-    component("Catalog",
-              "What is already prepared, and how long each step takes.",
-              ["Artifacts: weights and compile caches, each with where its copies live",
-               "A copy is marked validated once an engine served traffic with it",
-               "Engine registry: running engines, URL, lifetime",
-               "Learned timings per model, updated after every start"],
-              '<table class="plain"><tr><th>Artifact</th><th>Keyed by</th></tr>'
-              '<tr><td>Weights</td><td>model + revision</td></tr>'
-              '<tr><td>Compile cache</td><td>SGLang version, GPU, TP, model config</td></tr></table>'),
-    component("CPU prep + volumes",
-              "Weights are prepared without a GPU, on per-model storage.",
-              ["CPU prep: 8-CPU sandbox downloads from Hugging Face",
-               "Every shard in the index is checked before the weights count as ready",
-               "One weights volume and one compile-cache volume per model",
-               "Volumes are created on the first miss"],
-              '<table class="plain"><tr><th>Volume</th><th>Holds</th></tr>'
-              '<tr><td>fes-models-&lt;model&gt;</td><td>weights</td></tr>'
-              '<tr><td>fes-artifacts-&lt;model&gt;</td><td>compile cache (~29 MB)</td></tr>'
-              '<tr><td>fes-results</td><td>trial results</td></tr></table>'),
-    component("GPU engine",
-              "One sandbox per start, running the engine agent.",
-              ["At boot: records uptime, so Modal's scheduling wait is excluded",
-               "Starts weight prefetch, import prefetch, cache restore and SGLang together",
-               "One SGLang server per GPU group (e.g. 2 on 4×H100)",
-               "Reports READY with per-phase timings; writes the compile cache back on a miss"],
-              '<div class="panel green"><h4>Ready</h4><p>The worker registers the engine and its tunnel URL; the Playground can prompt it.</p></div>'
-              '<div class="panel blue"><h4>Stop</h4><p>By the user, at its lifetime, or when the sandbox exits.</p></div>'),
 
     # ---------------------------------------------------------------- results
-    f"""<section class="results" data-label="Outcome">
-  <h2>Results</h2>
-  {bars("Qwen3-30B · 2×H100", rename=RESULTS_LABELS)}
-  {bars("Qwen3-30B · 4×H100 · 2 engines", rename=RESULTS_LABELS)}
-  {bars("Qwen3-235B · 8×B200", rename=RESULTS_LABELS)}
-  {LEGEND}
-  <table class="plain compact">
-    <tr><th>Workload</th><th>Startup</th><th>GPU cost per start</th><th>Outputs</th></tr>
-    <tr><td>Qwen3-30B · 2×H100</td><td>229.8 → <b>84.5 s</b> (2.7×)</td><td>$0.50 → <b>$0.18</b></td><td>identical</td></tr>
-    <tr><td>Qwen3-30B · 4×H100 · 2 engines</td><td>223.9 → <b>155.5 s</b> (1.4×)</td><td>$0.98 → <b>$0.53</b></td><td>identical</td></tr>
-    <tr><td>Qwen3-235B · 8×B200</td><td>951.5 → <b>220.8 s</b> (4.3×)</td><td>$13.22 → <b>$3.03</b></td><td>identical</td></tr>
-  </table>
+    f"""<section class="results" data-label="Results">
+  <h2>Results: Qwen3-30B · 2×H100</h2>
+  {phase_savings("Qwen3-30B · 2×H100", 229.8, 84.5)}
+  {SIDES_LEGEND}
+  <p class="small">GPU cost per start $0.50 → $0.18. Medians: baseline n=3, now n=12.</p>
+</section>""",
+    f"""<section class="results" data-label="Results">
+  <h2>Results: Qwen3-235B · 8×B200</h2>
+  {phase_savings("Qwen3-235B · 8×B200", 951.5, 220.8)}
+  {SIDES_LEGEND}
+  <p class="small">GPU cost per start $13.22 → $3.03. n=1 on each side.</p>
+</section>""",
+    f"""<section class="results" data-label="Results">
+  <h2>Results: Qwen3-30B · 2 engines on 4×H100</h2>
+  {phase_savings("Qwen3-30B · 4×H100 · 2 engines", 223.9, 155.5)}
+  {SIDES_LEGEND}
+  <p class="small">GPU cost per start $0.98 → $0.53. Baseline n=1, now n=2. Startup also includes ~35 s outside the phases: slow container starts on this 4×H100 host. Both engines are ready within 0.2 s of each other.</p>
 </section>""",
 
     # ---------------------------------------------------------------- future work
@@ -648,7 +658,7 @@ table.plain td:first-child { color: var(--ink); font-weight: 600; }
 table.plain tr:last-child td { border-bottom: none; }
 table.plain.nowrap td { white-space: nowrap; }
 /* evolution steps */
-.steps { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1em; margin: .6em 0 1.2em; }
+.steps { display: grid; grid-template-columns: repeat(5, 1fr); gap: 1em; margin: .6em 0 1.2em; }
 .step { border: 1px solid var(--line); border-radius: 12px; padding: 1em 1.1em; background: var(--bg);
   box-shadow: 0 4px 16px rgba(15,23,42,.04); }
 .step:last-child { border-color: var(--accent); background: var(--accent-soft); }
@@ -669,6 +679,17 @@ table.plain.nowrap td { white-space: nowrap; }
 .legend i { display: inline-block; width: .75em; height: .75em; border-radius: 3px; margin-right: .45em; vertical-align: -.05em; }
 .results h2 { margin-bottom: .4em; } .results .chart { margin-bottom: .3em; } .results .chart-title { font-size: .9em; margin-bottom: .1em; }
 .results .bar { height: 1.25em; } .results .bar-row { margin: .12em 0; } .results .seg { font-size: .68em; }
+.results .chart-title { display: none; }
+svg.savings { width: 100%; height: auto; display: block; margin: -.2em 0 .2em; font-family: inherit; }
+svg.savings .grid { stroke: var(--line); } svg.savings .tick { font-size: 11px; fill: var(--faint); text-anchor: middle; }
+svg.savings .lab { font-size: 13.5px; fill: var(--ink); text-anchor: end; font-weight: 600; } svg.savings .lab.tot { font-weight: 800; font-size: 14.5px; }
+svg.savings .fix { font-size: 11px; fill: var(--muted); text-anchor: end; }
+svg.savings .base { fill: #94a3b8; } svg.savings .now { fill: #2a78d6; }
+svg.savings .val { font-size: 11.5px; fill: var(--ink2); }
+svg.savings .delta { font-size: 14px; font-weight: 700; text-anchor: end; } svg.savings .delta.good { fill: var(--good); } svg.savings .delta.bad { fill: var(--bad); } svg.savings .delta.flat { fill: var(--muted); }
+.legend.sides { margin-left: 0; } .legend.sides i.lb { background: #94a3b8; } .legend.sides i.ln { background: #2a78d6; }
+.stage td.good { color: var(--good); font-weight: 600; } .stage td.bad { color: var(--bad); font-weight: 600; }
+.stage tr.tot td { border-top: 2px solid var(--ink); font-weight: 700; }
 .results table.compact { font-size: .78em; margin-top: .3em; } .results table.compact td, .results table.compact th { padding: .3em .6em; }
 /* code block */
 .plain-seq li { font-size: .95em; margin-bottom: .8em; }
@@ -687,6 +708,14 @@ html[data-theme="dark"] pre.code { background: #020617; }
 .bs-ex { position: absolute; top: calc(100% + 1.55em); transform: translateX(-50%); font-size: .72em; color: var(--good); font-weight: 600; white-space: nowrap; }
 .bs-ex::before { content: "▲ "; }
 .bs-axis { font-size: .72em; color: var(--faint); text-align: right; margin-right: 1.2em; padding-top: 2.6em; }
+/* prefetch diagram */
+svg.pfd { width: 100%; height: auto; display: block; font-family: inherit; }
+svg.pfd .hd { font-size: 15px; font-weight: 700; fill: #0f172a; text-anchor: middle; } svg.pfd .sub { font-size: 12px; fill: #64748b; text-anchor: middle; }
+svg.pfd .file { fill: #fde2e2; stroke: #f5b4b4; } svg.pfd .ft { font-size: 13px; fill: #0f172a; text-anchor: middle; font-family: "SF Mono", Menlo, monospace; }
+svg.pfd .thr { fill: #e8f0fd; stroke: #93b4ea; } svg.pfd .tt { font-size: 13px; fill: #1d4ed8; font-weight: 600; text-anchor: middle; }
+svg.pfd .ram { fill: #ecfdf5; stroke: #9fdcc0; } svg.pfd .pg { fill: #a7e3c9; } svg.pfd .pt { font-size: 12px; fill: #065f46; text-anchor: middle; font-family: "SF Mono", Menlo, monospace; }
+svg.pfd .ar { stroke: #64748b; stroke-width: 1.8; } svg.pfd .dots { font-size: 22px; fill: #94a3b8; text-anchor: middle; }
+svg.pfd .lb { font-size: 11.5px; fill: #64748b; text-anchor: middle; }
 /* sequence diagram */
 svg.seqd { width: 100%; height: auto; display: block; margin: -.3em 0 .4em; font-family: inherit; }
 svg.seqd .lane { stroke-width: 1; } .l-user { fill: #e8f0fd; stroke: #c9dcf8; } .l-hw { fill: #f1f5f9; stroke: #cbd5e1; }

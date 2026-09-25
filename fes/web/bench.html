@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Benchmark · control plane — fast engine startup</title>
+<link rel="stylesheet" href="/viz.css">
+<style>
+.grid3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+.opt { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; cursor: pointer; background: var(--surface); }
+.opt:hover { border-color: var(--text-muted); }
+.opt.on { border-color: var(--accent, #2a78d6); box-shadow: 0 0 0 1px var(--accent, #2a78d6) inset; }
+.opt .t { font-weight: 650; font-size: 13.5px; }
+.opt .s { font-size: 12px; color: var(--text-secondary); margin-top: 2px; }
+.field { margin-top: 16px; }
+.field > label.lbl { display: block; font-size: 12px; font-weight: 650; color: var(--text-secondary); text-transform: uppercase; letter-spacing: .04em; margin-bottom: 6px; }
+.approaches { display: grid; grid-template-columns: repeat(2, 1fr); gap: 4px 18px; }
+.approaches label { display: flex; gap: 8px; align-items: baseline; font-size: 13px; padding: 3px 0; cursor: pointer; }
+.approaches .n { font-family: ui-monospace, Menlo, monospace; font-size: 12.5px; }
+.approaches .d { color: var(--text-muted); font-size: 12px; }
+.presets { display: flex; gap: 6px; margin-bottom: 8px; flex-wrap: wrap; }
+.row { display: flex; gap: 18px; align-items: center; flex-wrap: wrap; }
+.row input[type=number] { width: 64px; }
+.row input[type=text] { width: 240px; }
+.est { margin-top: 16px; padding: 10px 12px; border-radius: 8px; background: var(--surface-2); font-size: 13px; }
+.msg { font-size: 12.5px; color: var(--text-secondary); min-height: 17px; margin-top: 8px; }
+.empty { color: var(--text-muted); font-size: 13px; padding: 14px 0; }
+.section-gap { margin-top: 16px; }
+</style>
+</head>
+<body>
+<div class="viz-root console" id="app">
+  <header class="appbar">
+    <div class="brand"><span class="logo">FS</span><div><div class="product">Fast Engine Startup</div><div class="env">Control plane · Modal · SGLang v0.5.20</div></div></div>
+    <nav class="topnav">
+      <a href="/">Engines</a>
+      <a href="/jobs">Jobs</a>
+      <a href="/bench" aria-current="page">Benchmark</a>
+      <a href="/playground">Playground</a>
+      <a href="/catalog">Catalog</a>
+      <a href="/compare">Compare</a>
+      <a href="/analysis">Analysis</a>
+    </nav>
+    <div class="appbar-right"></div>
+  </header>
+  <main class="page">
+    <section class="panel">
+      <div class="panel-head"><div><h2>Run a benchmark</h2>
+        <p class="sub">Each trial is a cold start in a fresh sandbox, then an optional serving load. Trials run one after another, so they don't share volume bandwidth. Results land in <code>results/</code> and show up on Compare and Analysis.</p></div></div>
+
+      <div class="field"><label class="lbl">Workload</label><div class="grid3" id="workloads"></div></div>
+
+      <div class="field"><label class="lbl">Weights</label><div class="grid3" id="download"></div></div>
+
+      <div class="field"><label class="lbl">Approaches</label>
+        <div class="presets">
+          <button class="ghost sm" data-preset="baseline,graphs_pow2">Baseline vs current</button>
+          <button class="ghost sm" data-preset="graphs_on,graphs_pow2">Full vs pow2 CUDA graphs</button>
+          <button class="ghost sm" data-preset="baseline">Baseline only</button>
+          <button class="ghost sm" data-preset="">Clear</button>
+        </div>
+        <div class="approaches" id="approaches"></div></div>
+
+      <div class="field row">
+        <label>Trials per approach <input type="number" id="reps" min="1" max="5" value="1"></label>
+        <label><input type="checkbox" id="serving" checked> Measure serving after startup</label>
+        <label>Load levels (requests at a time) <input type="text" id="levels" placeholder="default: 32, 1"></label>
+      </div>
+
+      <div class="est" id="est"></div>
+      <div class="row" style="margin-top:12px"><button id="btnRun">Run benchmark</button></div>
+      <div class="msg" id="msg"></div>
+    </section>
+
+    <section class="panel section-gap">
+      <div class="panel-head"><div><h2>Recent benchmark jobs</h2>
+        <p class="sub">Open a job for its live log and per-trial results.</p></div>
+        <div class="actions"><button id="btnRefresh" class="ghost sm">Refresh</button></div></div>
+      <div id="jobs"></div>
+    </section>
+  </main>
+</div>
+<script src="/viz.js"></script>
+<script>
+"use strict";
+const S = { workload: "30b-2xh100", download: "none", picked: new Set(["baseline", "graphs_pow2"]), opts: null };
+const DOWNLOAD = {
+  none: ["Already on the volume", "Every result so far: the weights were downloaded once, earlier"],
+  cpu: ["Download first, on a CPU sandbox", "Our way: no GPU is billed while the weights download"],
+  gpu: ["Download first, on the GPU box", "Vanilla way: the GPUs are claimed and wait while it downloads"],
+};
+const when = (t) => (t ? new Date(t * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "—");
+async function api(path, body) {
+  const r = await fetch(path, body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const d = await r.json();
+  if (!r.ok) throw new Error(d.error || r.statusText);
+  return d;
+}
+
+function levels() { return $("levels").value.split(",").map((x) => x.trim()).filter(Boolean); }
+
+function renderWorkloads() {
+  const host = $("workloads"); host.replaceChildren();
+  for (const key of S.opts.workload_order) {
+    const w = S.opts.workloads[key];
+    const card = h("div", { class: "opt" + (key === S.workload ? " on" : "") },
+      h("div", { class: "t" }, w.label),
+      h("div", { class: "s" }, `${w.gpus} GPUs · $${(w.gpus * w.gpu_price).toFixed(2)}/hour · TP=${w.tp}${w.groups > 1 ? ` · ${w.groups} engines` : ""}`));
+    card.addEventListener("click", () => { S.workload = key; renderWorkloads(); renderEstimate(); });
+    host.appendChild(card);
+  }
+}
+
+function renderDownload() {
+  const host = $("download"); host.replaceChildren();
+  for (const [key, [t, sub]] of Object.entries(DOWNLOAD)) {
+    const card = h("div", { class: "opt" + (key === S.download ? " on" : "") }, h("div", { class: "t" }, t), h("div", { class: "s" }, sub));
+    card.addEventListener("click", () => { S.download = key; renderDownload(); renderEstimate(); });
+    host.appendChild(card);
+  }
+}
+
+function renderApproaches() {
+  const host = $("approaches"); host.replaceChildren();
+  for (const a of S.opts.approaches) {
+    const cb = h("input", { type: "checkbox" }); cb.checked = S.picked.has(a.name);
+    cb.addEventListener("change", () => { cb.checked ? S.picked.add(a.name) : S.picked.delete(a.name); renderEstimate(); });
+    host.appendChild(h("label", {}, cb, h("span", { class: "n" }, a.name), h("span", { class: "d" }, a.summary)));
+  }
+}
+
+function renderEstimate() {
+  const w = S.opts.workloads[S.workload], reps = Math.max(1, +$("reps").value || 1);
+  const chosen = S.opts.approaches.filter((a) => S.picked.has(a.name));
+  const trials = chosen.length * reps, dl = S.download === "none" ? 0 : w.download_min * trials;
+  const gpuMin = chosen.reduce((m, a) => m + (a.fast ? w.trial_min.fast : w.trial_min.vanilla), 0) * reps
+    + (S.download === "gpu" ? dl : 0);
+  const minutes = gpuMin + (S.download === "cpu" ? dl : 0);
+  const cost = (gpuMin / 60) * w.gpus * w.gpu_price;
+  const lv = levels();
+  $("est").textContent = chosen.length
+    ? `${trials} trial${trials > 1 ? "s" : ""} on ${w.label} · about ${minutes} min · roughly $${cost.toFixed(2)} of GPU time`
+      + (S.download === "cpu" ? ` · includes ~${w.download_min} min download per trial on CPU (no GPU billed)` : "")
+      + (S.download === "gpu" ? ` · includes ~${w.download_min} min download per trial with the GPUs waiting` : "")
+      + ($("serving").checked ? ` · serving at ${lv.length ? lv.join(", ") : S.opts.serving_default.join(", ")} at a time` : " · no serving load")
+    : "Pick at least one approach.";
+  $("btnRun").disabled = !chosen.length;
+}
+
+async function renderJobs() {
+  const jobs = (await api("/api/jobs")).filter((j) => j.kind === "bench").slice(0, 15);
+  const host = $("jobs"); host.replaceChildren();
+  if (!jobs.length) return host.appendChild(h("div", { class: "empty" }, "No benchmark jobs yet."));
+  const rows = jobs.map((j) => {
+    const w = S.opts.workloads[j.params.workload || "30b-2xh100"];
+    const done = (j.result && j.result.trials) || [];
+    const dlText = { cpu: " · download on CPU", gpu: " · download on GPU" }[j.params.download] || "";
+    return [h("a", { href: `/jobs?job=${j.id}`, class: "mono" }, j.id), (w ? w.label : "—") + dlText, (j.params.approaches || []).join(", "),
+      String(j.params.reps || 1), j.status, done.length ? `${done.filter((t) => t.ready_s != null).length}/${done.length} ok` : "—", when(j.created)];
+  });
+  host.appendChild(table(["Job", "Workload", "Approaches", "Trials each", "Status", "Trials", "Created"], rows));
+}
+
+async function run() {
+  const params = { workload: S.workload, download: S.download, approaches: [...S.picked], reps: Math.max(1, +$("reps").value || 1),
+    serving: $("serving").checked };
+  if (levels().length) params.serving_concurrency = levels().map(Number);
+  $("btnRun").disabled = true; $("msg").textContent = "Submitting…";
+  try {
+    const job = await api("/api/jobs", { kind: "bench", params });
+    $("msg").replaceChildren("Queued ", h("a", { href: `/jobs?job=${job.id}` }, `job ${job.id}`), ". A worker picks it up next.");
+    renderJobs();
+  } catch (e) { $("msg").textContent = `Could not submit: ${e.message}`; }
+  finally { $("btnRun").disabled = false; }
+}
+
+document.querySelectorAll("[data-preset]").forEach((b) => b.addEventListener("click", () => {
+  S.picked = new Set(b.dataset.preset.split(",").filter(Boolean)); renderApproaches(); renderEstimate();
+}));
+["reps", "levels", "serving"].forEach((id) => $(id).addEventListener("input", renderEstimate));
+$("serving").addEventListener("change", renderEstimate);
+$("btnRun").addEventListener("click", run);
+$("btnRefresh").addEventListener("click", renderJobs);
+(async () => {
+  S.opts = await api("/api/bench/options");
+  renderWorkloads(); renderDownload(); renderApproaches(); renderEstimate(); renderJobs();
+})();
+</script>
+</body>
+</html>

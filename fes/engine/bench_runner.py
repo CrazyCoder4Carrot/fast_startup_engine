@@ -34,6 +34,24 @@ CORRECTNESS_PROMPTS = [
 ]
 
 
+def read_files(paths: list[str], workers: int = 8) -> dict:
+    """Read whole files in parallel (to pull them out of Modal's lazily fetched image into memory)."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    def read(path: str) -> int:
+        n = 0
+        try:
+            with open(path, "rb", buffering=0) as f:
+                while (b := f.read(8 << 20)):
+                    n += len(b)
+        except OSError:
+            pass
+        return n
+    with ThreadPoolExecutor(workers) as ex:
+        total = sum(ex.map(read, paths))
+    return {"files": len(paths), "bytes": total}
+
+
 def correctness(base: str = BASE) -> dict:
     """Greedy answers to fixed prompts, hashed: equal hashes = same outputs across configs."""
     texts = [post("/generate", {"text": p, "sampling_params": {"max_new_tokens": 32, "temperature": 0}},
@@ -148,9 +166,25 @@ def main(cfg: dict) -> dict:
     if cfg.get("probe_read", True):
         prep["volume_read_gbps"] = probe_read_gbps(cfg["model_path"])
         log(f"raw volume read: {prep['volume_read_gbps']} GB/s")
+    # Big shared libraries first (torch, cuBLAS, Triton, NCCL, ...): the launcher's imports need
+    # them now, the weights only ~60 s later, so the weight prefetch waits until these are read.
+    libs_done = threading.Event()
+    libs_done.set()
+    if cfg.get("prefetch_libs"):
+        libs_done.clear()
+
+        def _libs():
+            t0 = time.time()
+            prep["libs"] = {**read_files(cfg["prefetch_libs"]), "done_at_s": round(time.time() - fn_start, 1),
+                            "seconds": round(time.time() - t0, 1)}
+            log(f"library prefetch done: {prep['libs']}")
+            libs_done.set()
+        threading.Thread(target=_libs, daemon=True).start()
+
     prefetch_result: dict = {}
     if cfg.get("prefetch"):
         def _prefetch():
+            libs_done.wait()
             prefetch_result.update(prefetch_weights(cfg["model_path"], **cfg["prefetch"]))
             log(f"prefetch done: {prefetch_result}")
         threading.Thread(target=_prefetch, daemon=True).start()

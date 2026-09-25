@@ -99,6 +99,11 @@ class JobAPI:
             unknown = [a for a in params.get("approaches", []) if a not in bench.APPROACHES]
             if unknown:
                 raise ValueError(f"unknown approaches {unknown}")
+            if params.get("workload", "30b-2xh100") not in bench.WORKLOADS:
+                raise ValueError(f"unknown workload {params.get('workload')!r}; expected one of {list(bench.WORKLOADS)}")
+            bench.serving_profiles(params.get("serving_concurrency"))  # reject a bad load list now
+            if params.get("download", "none") not in bench.DOWNLOAD_MODES:
+                raise ValueError(f"download must be one of {bench.DOWNLOAD_MODES}")
         if kind == "start_engine":
             scheduler.Request.from_dict(params)  # reject bad params now, not when a worker picks it up
         job = self.store.create(kind, params)
@@ -234,9 +239,14 @@ class JobWorker:
                     "startup_s": rec["actual"]["startup_s"], "scheduling_wait_s": rec["actual"]["scheduling_wait_s"],
                     "predicted_ready_s": round(rec["plan"]["predicted_ready_s"], 1)}
         if job["kind"] == "bench":
+            w = bench.WORKLOADS[p.get("workload", "30b-2xh100")]
             rows = bench.run_matrix(p.get("approaches", ["baseline", "jit_cache"]), int(p.get("reps", 1)),
                                     p.get("scenario", "fresh_start"), serving=p.get("serving", True),
-                                    emit=emit, cancelled=cancelled)
+                                    emit=emit, cancelled=cancelled, model=w["model"], gpu=w["gpu"], tp=w["tp"],
+                                    groups=w["groups"], profiles=bench.serving_profiles(p.get("serving_concurrency")),
+                                    download=p.get("download", "none"))
+            if rows and all(r["ready_s"] is None for r in rows):  # nothing succeeded: the job failed
+                raise RuntimeError(f"all {len(rows)} trial(s) failed; first error: {rows[0].get('error', '?')}")
             return {"trials": rows}
         raise ValueError(job["kind"])
 

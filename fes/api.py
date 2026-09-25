@@ -104,7 +104,7 @@ def generate(engine: dict, prompt: str, mode: str = "chat", max_tokens: int = 25
 # ================================================================ HTTP
 
 PAGES = {"/": "scheduler.html", "/engines": "scheduler.html", "/jobs": "jobs.html", "/playground": "playground.html",
-         "/catalog": "catalog.html", "/compare": "compare.html", "/analysis": "index.html"}
+         "/catalog": "catalog.html", "/compare": "compare.html", "/analysis": "index.html", "/bench": "bench.html"}
 MILESTONES = ("phase", "ready", "trial_done", "trial_failed", "error", "plan")
 
 
@@ -206,6 +206,14 @@ def create_app(store: Store, jobs: JobAPI, cat: Catalog) -> Flask:
 
         return Response(stream_with_context(events()), mimetype="text/event-stream",
                         headers={"X-Accel-Buffering": "no"})
+
+    @app.get("/api/bench/options")
+    def bench_options():
+        from fes import bench
+        fast = lambda a: bool(bench.APPROACHES[a].get("prefetch") or bench.APPROACHES[a].get("restore_cache"))
+        return jsonify(workloads=bench.WORKLOADS, workload_order=list(bench.WORKLOADS),
+                       approaches=[{"name": a, "summary": bench.approach_summary(a), "fast": fast(a)} for a in bench.APPROACHES],
+                       serving_default=[p["concurrency"] for p in bench.SERVING])
 
     @app.get("/api/engines")
     def engines():

@@ -22,7 +22,7 @@ import time
 import modal
 
 from fes.paths import ENGINE, EXPERIMENTS, RESULTS
-from fes.common import (MODEL_ID, MODELS_DIR, RESULTS_DIR, SGLANG_VERSION, artifacts_volume, engine_memory, model_path, model_volume,
+from fes.common import (MODEL_ID, MODELS_DIR, RESULTS_DIR, SGLANG_VERSION, artifacts_volume, engine_cpus, engine_memory, hf_secret, model_path, model_volume,
                     results_vol, with_bytecode, with_lazy_imports, without_vision_packages)
 
 GPU = "H100!:2"  # "!" pins H100 so Modal doesn't silently upgrade to H200
@@ -34,6 +34,17 @@ MX_ENV = {
 }
 MX_FLAGS = ["--load-format", "remote_instance", "--remote-instance-weight-loader-backend", "modelexpress",
             "--modelexpress-config", json.dumps({"transport": "nixl", "url": "127.0.0.1:8001"})]
+
+# Shared libraries over 16 MB that `import sglang.launch_server` maps (measured in the engine image).
+_SP = "/opt/sglang/lib/python3.12/site-packages"
+BIG_LIBS = [f"{_SP}/{p}" for p in (
+    "nvidia/cu13/lib/libcublasLt.so.13", "torch/lib/libtorch_cuda.so", "triton/_C/libtriton.so", "torch/lib/libtorch_cpu.so",
+    "nvidia/cu13/lib/libcufft.so.12", "nvidia/nccl/lib/libnccl.so.2", "nvidia/cusparselt/lib/libcusparseLt.so.0",
+    "nvidia/cu13/lib/libcusparse.so.12", "nvidia/cu13/lib/libcusolver.so.12", "nvidia/cu13/lib/libcurand.so.10",
+    "nvidia/cu13/lib/libnvrtc.so.13", "nvidia/cu13/lib/libnvJitLink.so.13", "nvidia/cu13/lib/libcublas.so.13",
+    "xgrammar/libxgrammar_bindings.so", "nvidia/nvshmem/lib/libnvshmem_host.so.3", "torch/lib/libtorch_python.so",
+    "scipy.libs/libscipy_openblas-5f890258.so", "numpy.libs/libscipy_openblas64_-fdde5778.so")] + [
+    "/usr/lib/x86_64-linux-gnu/libicudata.so.74.2", "/usr/lib/x86_64-linux-gnu/libcodec2.so.1.2"]
 
 APPROACHES = {
     # Vanilla launch. Also writes the compile cache back, so jit_cache has something to restore.
@@ -70,6 +81,18 @@ APPROACHES = {
     # Keep decode graphs (where serving benefits most), skip the 58-size prefill capture.
     "graphs_decode_only": {"extra_args": ["--disable-prefill-cuda-graph"], "prefetch": {"workers": 16, "chunk_mb": 16},
                            "restore_cache": True, "bytecode": True},
+    # Diagnostic: the current engine plus per-process start markers and Python's import timing, to
+    # split "imports + spawn" into launcher imports, worker spawn and worker imports (dashboard.proc_breakdown).
+    "trace_imports": {"extra_args": ["--cuda-graph-bs-decode", *[str(2 ** i) for i in range(9)],
+                                     "--cuda-graph-bs-prefill", *[str(2 ** i) for i in range(2, 14)]],
+                      "prefetch": {"workers": 16, "chunk_mb": 16}, "restore_cache": True, "bytecode": True,
+                      "env": {"FES_TRACE_PROCS": "1", "PYTHONPROFILEIMPORTTIME": "1", "PYTHONPATH": "/root/proc_trace:/pkg/:/root/"}},
+    # The current engine plus the big shared libraries the launcher maps (20 files over 16 MB, 3.6 GB,
+    # which the import prefetch skips), read first at boot; the weight prefetch starts after them.
+    "prefetch_torch_libs": {"extra_args": ["--cuda-graph-bs-decode", *[str(2 ** i) for i in range(9)],
+                                           "--cuda-graph-bs-prefill", *[str(2 ** i) for i in range(2, 14)]],
+                            "prefetch": {"workers": 16, "chunk_mb": 16}, "restore_cache": True, "bytecode": True,
+                            "prefetch_libs": BIG_LIBS},
     "fastsafetensors": {"extra_args": ["--load-format", "fastsafetensors"]},
     "runai_streamer": {"extra_args": ["--load-format", "runai_streamer"], "env": {"RUNAI_STREAMER_CONCURRENCY": "32"}},
     "no_cuda_graph": {"extra_args": ["--disable-cuda-graph"]},
@@ -81,10 +104,66 @@ SERVING = [
     {"n": 16, "concurrency": 1, "input_words": 800, "output_tokens": 256},    # latency-bound: where CUDA graphs matter most
 ]
 
+# Where a trial's weights come from. "none": already on the model's volume (every result so far).
+# "cpu" / "gpu": start from nothing and download from Hugging Face into a temporary volume first,
+# on a CPU sandbox (the scheduler's way: no GPU billed) or on the GPU box (vanilla: GPUs wait).
+DOWNLOAD_MODES = ("none", "cpu", "gpu")
+
+# The benchmarked workloads (the Benchmark page offers these). trial_min: rough minutes per trial,
+# for "fast" approaches (prefetch / compile cache) and vanilla ones, used for the cost estimate.
+WORKLOADS = {
+    "30b-2xh100": {"label": "Qwen3-30B · 2×H100", "model": MODEL_ID, "gpu": "H100!:2", "tp": 2, "groups": 1,
+                   "gpus": 2, "gpu_price": 3.95, "trial_min": {"fast": 5, "vanilla": 7}, "download_min": 3},
+    "30b-4xh100": {"label": "Qwen3-30B · 2 engines on 4×H100", "model": MODEL_ID, "gpu": "H100!:2", "tp": 2, "groups": 2,
+                   "gpus": 4, "gpu_price": 3.95, "trial_min": {"fast": 6, "vanilla": 7}, "download_min": 3},
+    "235b-8xb200": {"label": "Qwen3-235B · 8×B200", "model": "Qwen/Qwen3-235B-A22B-Instruct-2507", "gpu": "B200:8", "tp": 8,
+                    "groups": 1, "gpus": 8, "gpu_price": 6.25, "trial_min": {"fast": 8, "vanilla": 22}, "download_min": 17},
+}
+
+
+def serving_profiles(levels) -> list[dict]:
+    """Serving loads for a trial: the defaults, or one profile per concurrency level (4x as many requests)."""
+    if not levels:
+        return SERVING
+    if isinstance(levels, str):
+        levels = [x for x in levels.replace(" ", "").split(",") if x]
+    return [{"n": 4 * int(c), "concurrency": int(c), "input_words": 800, "output_tokens": 256} for c in levels]
+
+
+def approach_summary(name: str) -> str:
+    """One line describing what an approach turns on, from its settings."""
+    a, args = APPROACHES[name], " ".join(APPROACHES[name]["extra_args"])
+    parts = []
+    if a.get("restore_cache"):
+        parts.append("compile cache")
+    if a.get("prefetch"):
+        parts.append("weight prefetch")
+    if a.get("bytecode"):
+        parts.append("bytecode")
+    if a.get("prefetch_libs"):
+        parts.append("big-library prefetch")
+    if a.get("image") in ("lazy", "text_only"):
+        parts.append("lazy imports" + (", no vision packages" if a["image"] == "text_only" else ""))
+    if a.get("image") == "mx":
+        parts.append("ModelExpress streamer")
+    if "--cuda-graph-bs-decode" in args:
+        parts.append("pow2 CUDA graphs")
+    elif "--disable-cuda-graph" in args:
+        parts.append("no CUDA graphs")
+    elif "--cuda-graph-max-bs-decode" in args:
+        parts.append("small CUDA graphs")
+    elif "--disable-prefill-cuda-graph" in args:
+        parts.append("decode graphs only")
+    elif "--load-format" in args and a.get("image") != "mx":
+        parts.append(args.split("--load-format ")[1].split()[0] + " loader")
+    return ", ".join(parts) or "vanilla SGLang"
+
 _base = modal.Image.from_registry(f"lmsysorg/sglang:{SGLANG_VERSION}").entrypoint([])
 _layers = lambda img: (img.env({"PYTHONUNBUFFERED": "1", "HF_HUB_OFFLINE": "1"})
                        .add_local_file(str(ENGINE / "sglang_engine.py"), "/root/sglang_engine.py", copy=True)
-                       .add_local_file(str(ENGINE / "bench_runner.py"), "/root/bench_runner.py", copy=True))
+                       .add_local_file(str(ENGINE / "bench_runner.py"), "/root/bench_runner.py", copy=True)
+                       .add_local_file(str(ENGINE / "proc_trace" / "sitecustomize.py"), "/root/proc_trace/sitecustomize.py",
+                                       copy=True))
 # Stock image for baseline and existing approaches, so the original comparison stays like-for-like.
 image = _layers(_base)
 image_bytecode = _layers(with_bytecode(_base))
@@ -135,8 +214,13 @@ def _print_emit(type_: str, **d) -> None:
 
 def run_trial(app: modal.App, approach: str, rep: int, scenario: str, serving: bool,
               emit=_print_emit, cancelled: threading.Event | None = None,
-              model: str = MODEL_ID, gpu: str = GPU, tp: int = TP, groups: int = 1) -> dict:
+              model: str = MODEL_ID, gpu: str = GPU, tp: int = TP, groups: int = 1, profiles: list | None = None,
+              download: str = "none", cpus: int | None = None) -> dict:
     """One cold-start trial in a fresh GPU sandbox. Emits events; raises on failure.
+
+    download "cpu" / "gpu": the weights start absent. They are downloaded into a temporary volume
+    (deleted afterwards; the model's own volume is never touched), on a CPU sandbox before the GPU
+    sandbox exists, or on the GPU sandbox before SGLang starts. The time is recorded as "download".
 
     groups > 1: that many SGLang servers on one host, `tp` GPUs each (A: GPU 0-1, B: 2-3, ...)."""
     spec = APPROACHES[approach]
@@ -144,6 +228,8 @@ def run_trial(app: modal.App, approach: str, rep: int, scenario: str, serving: b
     if groups > 1:
         gpu = f"{gpu.split(':')[0]}:{tp * groups}"
         tag += f"-{groups}x"
+    if download != "none":
+        tag += f"-dl{download}"
     run_id = f"{time.strftime('%Y%m%d-%H%M%S')}-{approach}{tag}-r{rep}"
     out = f"{RESULTS_DIR}/bench/{run_id}"
     cfg = {
@@ -151,13 +237,59 @@ def run_trial(app: modal.App, approach: str, rep: int, scenario: str, serving: b
         "model": model, "model_path": model_path(model), "tp": tp, "sglang": SGLANG_VERSION,
         "extra_args": spec["extra_args"], "env": spec.get("env", {}),
         "restore_cache": spec.get("restore_cache", False), "save_cache": spec.get("save_cache", False),
-        "discover": spec.get("discover", False), "serving": SERVING if serving else None, "out": out,
+        "discover": spec.get("discover", False), "serving": (profiles or SERVING) if serving else None, "out": out,
         "prefetch": spec.get("prefetch"), "mx_infra": spec.get("mx_infra", False), "probe_read": spec.get("probe_read", True),
+        "prefetch_libs": spec.get("prefetch_libs"),
         "groups": [{"name": chr(ord("a") + i), "devices": ",".join(str(i * tp + j) for j in range(tp)), "port": 30000 + 10 * i}
                    for i in range(groups)] if groups > 1 else [],
     }
-    emit("trial_started", run_id=run_id, approach=approach, rep=rep, scenario=scenario)
+    emit("trial_started", run_id=run_id, approach=approach, rep=rep, scenario=scenario, download=download)
 
+    from fes import workers  # CPU prep worker + its download script
+    weights_vol, dl_name, dl = model_volume(model), None, None
+    if download != "none":
+        dl_name = f"fes-bench-dl-{run_id}".lower()[:60]
+        weights_vol = modal.Volume.from_name(dl_name, create_if_missing=True, version=2)
+        emit("log", line=f"weights start absent: downloading into temporary volume {dl_name} ({download})")
+    try:
+        if download == "cpu":
+            t0 = time.time()
+            r = workers.prepare_weights(model, on_sandbox=lambda sid: emit("sandbox", role="prep", sandbox_id=sid),
+                                        volume=weights_vol)
+            dl = {"mode": "cpu", "seconds": r["seconds"], "wall_s": round(time.time() - t0, 1), "bytes": r["bytes"]}
+            emit("log", line=f"download done on CPU: {dl}")
+        return _trial(app, approach, rep, scenario, spec, cfg, run_id, model, gpu, weights_vol, download, dl, emit, cancelled,
+                      cpus or engine_cpus(gpu))
+    finally:
+        if dl_name:
+            try:
+                modal.Volume.objects.delete(dl_name)
+                emit("log", line=f"deleted temporary volume {dl_name}")
+            except Exception as e:
+                emit("log", line=f"could not delete temporary volume {dl_name}: {e}")
+
+
+def _exec_text(sb: modal.Sandbox, *cmd: str, emit=_print_emit, tries: int = 3) -> tuple[str, int]:
+    """Run a command in the sandbox and return (stdout, returncode). Modal occasionally loses an
+    exec's output stream ("Failed to read exec stdio stream"); the command is then run again.
+    Only for commands that are safe to repeat (the uptime probe, a resumable download)."""
+    for attempt in range(1, tries + 1):
+        try:
+            p = sb.exec(*cmd)
+            out = p.stdout.read()
+            p.wait()
+            return out, p.returncode
+        except Exception as e:
+            if attempt == tries or "stdio stream" not in str(e):
+                raise
+            emit("log", line=f"exec output stream lost ({e}); retrying {attempt}/{tries - 1}")
+            time.sleep(5)
+
+
+def _trial(app, approach, rep, scenario, spec, cfg, run_id, model, gpu, weights_vol, download, dl, emit, cancelled,
+           cpus: int) -> dict:
+    """The GPU part of a trial: sandbox, (GPU-side download), bench_runner, results."""
+    from fes import workers
     t_create = time.time()
     sb = modal.Sandbox.create(
         "sleep", "infinity",
@@ -166,22 +298,36 @@ def run_trial(app: modal.App, approach: str, rep: int, scenario: str, serving: b
         # 235B vanilla (no prefetch) needs ~55 min for weights alone; 45 min killed it mid-load.
         gpu=gpu, timeout=(100 if "235B" in cfg["model"] else 45) * 60,
         memory=engine_memory(_weights_bytes(model), gpu)[0],  # (request, limit) MiB
-        volumes={MODELS_DIR: model_volume(model), RESULTS_DIR: results_vol, "/artifacts": artifacts_volume(model)},
+        cpu=cpus,  # reserved CPUs, as for real engines (common.engine_cpus: 4 per GPU) unless overridden
+        volumes={MODELS_DIR: weights_vol, RESULTS_DIR: results_vol, "/artifacts": artifacts_volume(model)},
+        secrets=[hf_secret] if download == "gpu" else [],
         tags={"scenario": scenario, "approach": approach, "rep": str(rep)},
     )
+    emit("log", line=f"sandbox {sb.object_id} created; waiting for {gpu} and the container")
     summary = None
     local_dir = str(RESULTS / run_id)
     os.makedirs(local_dir, exist_ok=True)
     try:
-        up = sb.exec("bash", "-c", "cut -d' ' -f1 /proc/uptime; date +%s.%N")
-        uptime_s, container_now = (float(x) for x in up.stdout.read().split())
-        up.wait()
+        up_out, _ = _exec_text(sb, "bash", "-c", "cut -d' ' -f1 /proc/uptime; date +%s.%N", emit=emit)
+        uptime_s, container_now = (float(x) for x in up_out.split())
         container_start_s = round(time.time() - t_create, 1)
         # The sandbox's uptime starts when its container starts, so everything before that
         # since create() is Modal scheduling (waiting for a host with free GPUs): not counted.
         scheduling_wait_s = round(min(max(container_now - uptime_s - t_create, 0.0), container_start_s), 1)
         emit("sandbox", role="bench", sandbox_id=sb.object_id, container_start_s=container_start_s,
              scheduling_wait_s=scheduling_wait_s, run_id=run_id)
+
+        if download == "gpu":  # vanilla order: the GPUs are claimed and wait while the weights download
+            t0 = time.time()
+            # The bench image runs offline (HF_HUB_OFFLINE=1) so a trial can never download by accident;
+            # this one command is the intended download.
+            out, rc = _exec_text(sb, "env", "HF_HUB_OFFLINE=0", "python", "-c", workers.PREP_WEIGHTS, model, model_path(model),
+                                 emit=emit)  # snapshot_download resumes, so a retry continues where it stopped
+            r = json.loads(out.split("__PREP__", 1)[1].split("\n", 1)[0]) if "__PREP__" in out else {}
+            if not r.get("complete"):
+                raise RuntimeError(f"GPU-side download failed (exit {rc}): {out[-1500:]}")
+            dl = {"mode": "gpu", "seconds": r["seconds"], "wall_s": round(time.time() - t0, 1), "bytes": r["bytes"]}
+            emit("log", line=f"download done on the GPU box (GPUs idle, billed): {dl}")
 
         p = sb.exec("python", "/root/bench_runner.py", json.dumps(cfg))
         with open(os.path.join(local_dir, "runner.log"), "w") as rlog:
@@ -217,6 +363,8 @@ def run_trial(app: modal.App, approach: str, rep: int, scenario: str, serving: b
 
         summary["container_start_s"] = container_start_s
         summary["scheduling_wait_s"] = scheduling_wait_s
+        summary["download"] = dl  # None when the weights were already on the volume
+        summary["cpus_reserved"] = cpus
         for name in ("run1.log", "gpu.csv"):
             try:
                 data = b"".join(results_vol.read_file(f"bench/{run_id}/{name}"))
@@ -234,13 +382,14 @@ def run_trial(app: modal.App, approach: str, rep: int, scenario: str, serving: b
     b = summary["bench"]
     emit("trial_done", run_id=run_id, approach=approach, rep=rep, ready_s=r["marks"]["first_request_done"],
          container_start_s=summary["container_start_s"], correctness_hash=b["correctness"]["hash"],
-         serving=b.get("serving"), prep=b.get("prep"), local_dir=local_dir)
+         serving=b.get("serving"), prep=b.get("prep"), local_dir=local_dir, download=dl)
     return summary
 
 
 def run_matrix(approaches: list[str], reps: int, scenario: str = "fresh_start", serving: bool = True,
                emit=_print_emit, cancelled: threading.Event | None = None,
-               model: str = MODEL_ID, gpu: str = GPU, tp: int = TP, groups: int = 1) -> list[dict]:
+               model: str = MODEL_ID, gpu: str = GPU, tp: int = TP, groups: int = 1, profiles: list | None = None,
+               download: str = "none", cpus: int | None = None) -> list[dict]:
     """Sequential on purpose: parallel trials would share volume bandwidth and skew load times."""
     app = modal.App.lookup("fes-bench", create_if_missing=True)
     rows = []
@@ -250,13 +399,14 @@ def run_matrix(approaches: list[str], reps: int, scenario: str = "fresh_start", 
                 return rows
             try:
                 s = run_trial(app, a, rep, scenario, serving, emit=emit, cancelled=cancelled, model=model, gpu=gpu, tp=tp,
-                              groups=groups)
+                              groups=groups, profiles=profiles, download=download, cpus=cpus)
                 rows.append({"approach": a, "rep": rep, "run_id": s["run_id"],
                              "ready_s": max(r["marks"]["first_request_done"] for r in s["runs"]),
-                             "container_start_s": s["container_start_s"]})
+                             "container_start_s": s["container_start_s"],
+                             "download_s": (s.get("download") or {}).get("wall_s")})
             except Exception as e:
                 emit("trial_failed", run_id=f"{a}-r{rep}", approach=a, rep=rep, error=str(e))
-                rows.append({"approach": a, "rep": rep, "ready_s": None, "container_start_s": None})
+                rows.append({"approach": a, "rep": rep, "ready_s": None, "container_start_s": None, "error": str(e)[-500:]})
     return rows
 
 
@@ -298,6 +448,9 @@ def main():
     ap.add_argument("--serving-concurrency", default="",
                     help="comma-separated load levels to run instead of the defaults, e.g. 20,32,100 "
                          "(4x that many requests each, same prompt and output length)")
+    ap.add_argument("--download", choices=DOWNLOAD_MODES, default="none",
+                    help="start without weights: download into a temporary volume on a CPU sandbox or on the GPU box")
+    ap.add_argument("--cpus", type=int, default=None, help="CPUs to reserve (default: as for engines, 4 per GPU)")
     ap.add_argument("--list", action="store_true")
     ap.add_argument("--recover", action="store_true", help="pull finished trials missing locally from the volume")
     args = ap.parse_args()
@@ -307,9 +460,6 @@ def main():
         for k, v in APPROACHES.items():
             print(f"{k:16} {' '.join(v['extra_args']) or '(vanilla flags)'}")
         return
-    if args.serving_concurrency:  # e.g. batch sizes that fall between two power-of-two graphs
-        SERVING[:] = [{"n": 4 * c, "concurrency": c, "input_words": 800, "output_tokens": 256}
-                      for c in map(int, args.serving_concurrency.split(","))]
     approaches = args.approaches.split(",")
     unknown = [a for a in approaches if a not in APPROACHES]
     if unknown:
@@ -317,7 +467,8 @@ def main():
 
     with modal.enable_output():
         rows = run_matrix(approaches, args.reps, args.scenario, serving=not args.no_serving,
-                          model=args.model, gpu=args.gpu, tp=args.tp, groups=args.groups)
+                          model=args.model, gpu=args.gpu, tp=args.tp, groups=args.groups,
+                          profiles=serving_profiles(args.serving_concurrency), download=args.download, cpus=args.cpus)
     print("\napproach          rep   ready_s  container_s")
     for r in rows:
         ready = "failed" if r["ready_s"] is None else round(r["ready_s"], 1)

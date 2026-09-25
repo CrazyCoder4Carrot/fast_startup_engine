@@ -52,6 +52,7 @@ tbody tr.clickable { cursor: pointer; }
     <nav class="topnav">
       <a href="/">Engines</a>
       <a href="/jobs">Jobs</a>
+      <a href="/bench">Benchmark</a>
       <a href="/playground">Playground</a>
       <a href="/catalog">Catalog</a>
       <a href="/compare" aria-current="page">Compare</a>
@@ -205,6 +206,24 @@ function pairGroups(all) {
   return [all.filter((i) => i.side === "Original"), all.filter((i) => i.side === "Current")];
 }
 const pairNames = () => (S.mode === "two" ? ["Run A", "Run B"] : ["original", "current"]);
+// First-start weight download on each side. Original vs current: the vanilla way (download on the
+// GPU box, GPUs idle and billed) vs today's (download on a CPU sandbox before any GPU); the medians
+// of the runs that had one. Compare two: Run A's and Run B's own download (0 = weights were cached).
+function downloadPair(all) {
+  const med = (xs) => (xs.length ? median(xs.map((i) => i.download_s)) : null);
+  const medTotal = (xs) => (xs.length ? median(xs.map((i) => i.download_s + i.end_to_end_s)) : null);  // download + startup
+  if (S.mode === "two") {
+    const [A, B] = pairGroups(all);
+    return { o: A[0] ? A[0].download_s || 0 : null, c: B[0] ? B[0].download_s || 0 : null,
+             om: A[0] && A[0].download_mode, cm: B[0] && B[0].download_mode,
+             to: A[0] ? (A[0].download_s || 0) + A[0].end_to_end_s : null, tc: B[0] ? (B[0].download_s || 0) + B[0].end_to_end_s : null };
+  }
+  const every = modelItems();
+  const O = every.filter((i) => i.download_s > 0 && i.download_mode === "gpu" && (i.stack || "").startsWith("vanilla"));
+  const C = every.filter((i) => i.download_s > 0 && i.side === "Current");
+  return { o: med(O), c: med(C), om: "gpu", cm: "cpu", nO: O.length, nC: C.length, to: medTotal(O), tc: medTotal(C) };
+}
+const dlGpuCost = (sec, mode) => (mode === "gpu" ? dollars(sec) : "$0.00");  // a CPU-sandbox download bills no GPU
 function renderKpis() {
   const all = items();
   const [O, C] = pairGroups(all), [nO, nC] = pairNames();
@@ -225,6 +244,14 @@ function renderKpis() {
     kpi(fmt(grc, 1), "s", `CUDA graph capture, ${nC}`, `${nO} ${fmt(gro, 1)} s`, grc < gro),
     kpi(fmt(median(C.map((i) => i.load_s).filter((x) => x > 0)), 1), "s", `Weight load, ${nC}`, `${nO} ${fmt(median(O.map((i) => i.load_s).filter((x) => x > 0)), 1)} s`,
         median(C.map((i) => i.load_s).filter((x) => x > 0)) < median(O.map((i) => i.load_s).filter((x) => x > 0))),
+    ...(() => {  // first-start weight download, when this workload has any
+      const d = downloadPair(all);
+      if (d.o == null || d.c == null || (!d.o && !d.c)) return [];
+      const where = (m, v) => (!v ? "weights cached" : m === "gpu" ? "on the GPU box" : "on a CPU sandbox");
+      return [kpi(fmt(d.c, 0), "s", `First-start download, ${nC}${S.mode === "two" ? "" : " (median)"}`,
+        `${where(d.cm, d.c)} · GPU cost ${d.c ? dlGpuCost(d.c, d.cm) : "$0.00"} · ${nO} ${fmt(d.o, 0)} s ${where(d.om, d.o)}`
+        + (d.o ? `, GPU cost ${dlGpuCost(d.o, d.om)}` : ""), (d.c ? (d.cm === "gpu" ? d.c : 0) : 0) < (d.om === "gpu" ? d.o : 0))];
+    })(),
     S.mode === "two" ? kpi(C[0].stack === O[0].stack ? "same" : "Δ", "", "Configuration", `A: ${O[0].stack} · B: ${C[0].stack}`)
       : kpi(`${O.length} / ${C.length}`, "", "Launches compared", `original / current · plus ${all.length - O.length - C.length} earlier iterations`),
   );
@@ -259,7 +286,7 @@ function sectioned(host, rowsFn, opts) {
       y += rowH + gap;
     });
     if (rows.length > 1) {  // a median of one run is just that run
-      const m = median(rows.map(opts.total));
+      const m = median(rows.map(opts.medianOf || opts.total));
       el("line", { x1: x(m), x2: x(m), y1: y0 - 6, y2: y - gap + 6, stroke: css("--text-primary"), "stroke-width": 1.5, "stroke-dasharray": "4 3" }, svg);
       text(svg, x(m) + 4, y0 - 8, `median ${fmt(m, 0)}${opts.unit || " s"}`, { "font-size": 10.5 });
     }
@@ -275,35 +302,53 @@ function renderCompare() {
   if (!all.length) return host.appendChild(h("div", { class: "empty" }, "No launches yet."));
 
   if (state.tables.cmp) {
-    host.appendChild(table(["Side", "Launch", "Source", "Startup s (excl. scheduling)", "GPU scheduling s (excluded)", "Spawn → ready s", "GPU billed s", "Cost", "Weight load s", "Graph capture s", ...G.map((g) => g.split(" (")[0] + " s")],
-      all.map((i) => [i.side, `${i.label} · ${i.id}`, i.source, fmt(i.end_to_end_s), fmt(i.scheduling_wait_s) + (i.scheduling_estimated ? " (est.)" : ""), fmt(i.ready_s), fmt(i.gpu_billed_s), dollars(i.gpu_billed_s),
-        fmt(i.load_s), fmt(i.graph_s), ...i.groups.map((v) => fmt(v))]), [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]));
+    host.appendChild(table(["Side", "Launch", "Source", "Download s", "Startup s (excl. scheduling)", "GPU scheduling s (excluded)", "Spawn → ready s", "GPU billed s", "Cost", "Weight load s", "Graph capture s", ...G.map((g) => g.split(" (")[0] + " s")],
+      all.map((i) => [i.side, `${i.label} · ${i.id}`, i.source, i.download_s ? `${fmt(i.download_s)} (${i.download_mode})` : "—", fmt(i.end_to_end_s), fmt(i.scheduling_wait_s) + (i.scheduling_estimated ? " (est.)" : ""), fmt(i.ready_s), fmt(i.gpu_billed_s), dollars(i.gpu_billed_s),
+        fmt(i.load_s), fmt(i.graph_s), ...i.groups.map((v) => fmt(v))]), [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]));
     return;
   }
 
+  const DL_COLOR = "#94a3b8", hasDl = all.some((i) => i.download_s > 0);
+  const dlLegend = (leg) => {  // a grey swatch for the weight download, when any run had one
+    if (!hasDl) return leg;
+    const it = h("span", { class: "item" }), sw = h("span", { class: "sw" });
+    sw.style.background = DL_COLOR; it.append(sw, h("span", {}, "Weight download (before startup)")); leg.appendChild(it);
+    return leg;
+  };
+  // A run that started without weights: a grey download segment ahead of its bar; returns where the bar starts.
+  const dlBar = (svg, it, x, y, rh) => {
+    const d = it.download_s || 0;
+    if (!d) return 0;
+    const bar = roundedBar(svg, x(0), y, Math.max(x(d) - x(0) - 2, 0.8), rh, DL_COLOR, { left: true, right: false });
+    hover(bar, () => [`${it.label} · ${it.id}`, [{ value: `${fmt(d)} s`, name: "weight download, " + (it.download_mode === "gpu" ? "on the GPU box (GPUs idle, billed)" : "on a CPU sandbox (no GPU billed)"), color: DL_COLOR }]]);
+    if (x(d) - x(0) > 70) text(svg, x(d / 2), y + rh / 2 + 4, `download ${fmt(d, 0)}`, { "text-anchor": "middle", "font-size": 10.5 }).style.fill = "#0b0b0b";
+    return d;
+  };
   const legendSides = () => {
     const leg = h("div", { class: "legend" });
     activeSides().forEach((n) => { const it = h("span", { class: "item" }), sw = h("span", { class: "sw" }); sw.style.background = sideColor(n); sw.style.opacity = sideOpacity(n); it.append(sw, h("span", {}, n)); leg.appendChild(it); });
-    return leg;
+    return dlLegend(leg);
   };
 
   if (S.view === "ready") {
     $("cmpSub").textContent = S.mode === "two" ? "Startup for the two selected runs: container boot + any prep + spawn → first request served. Time Modal spends finding free GPUs (scheduling) is excluded."
       : "Startup for each launch: container boot + any prep + spawn → first request served. Time Modal spends finding free GPUs (scheduling) is excluded. Dashed tick = median per group; faded bars are earlier iterations.";
     sectioned(host, (svg, it, x, y, rh) => {
-      const bar = roundedBar(svg, x(0), y, Math.max(x(it.end_to_end_s) - x(0), 1), rh, sideColor(it.side), { left: false });
+      const d = dlBar(svg, it, x, y, rh);
+      const bar = roundedBar(svg, x(d), y, Math.max(x(d + it.end_to_end_s) - x(d), 1), rh, sideColor(it.side), { left: !d });
       bar.setAttribute("fill-opacity", sideOpacity(it.side));
       hover(bar, () => [`${it.label} · ${it.id}`, [{ value: `${fmt(it.end_to_end_s)} s`, name: "startup (excl. scheduling)", color: sideColor(it.side) },
         { value: `${fmt(it.scheduling_wait_s)} s${it.scheduling_estimated ? " (est.)" : ""}`, name: "GPU scheduling, excluded" },
         { value: `${fmt(it.container_start_s)} s`, name: "container start (incl. scheduling)" }, { value: `${fmt(it.ready_s)} s`, name: "spawn → ready" }]]);
-    }, { label: "Time to ready", total: (i) => i.end_to_end_s, tipLabel: (i) => `${fmt(i.end_to_end_s)} s` });
+    }, { label: "Time to ready", total: (i) => i.end_to_end_s + (i.download_s || 0), medianOf: (i) => i.end_to_end_s,
+         tipLabel: (i) => (i.download_s ? `${fmt(i.end_to_end_s)} s + ${fmt(i.download_s)} s download` : `${fmt(i.end_to_end_s)} s`) });
     host.appendChild(legendSides());
   }
 
   if (S.view === "phases") {
     $("cmpSub").textContent = "Spawn → ready split into the five phase groups (same colors as the analysis dashboard). Container start is excluded here.";
     sectioned(host, (svg, it, x, y, rh) => {
-      let x0 = 0;
+      let x0 = dlBar(svg, it, x, y, rh);
       const nz = it.groups.map((v, g) => [v, g]).filter(([v]) => v > 0);
       nz.forEach(([v, g], k) => {
         const bx = x(x0), bw = Math.max(x(x0 + v) - bx - 2, 0.8);
@@ -312,17 +357,29 @@ function renderCompare() {
         if (bw > 34) text(svg, bx + bw / 2, y + rh / 2 + 4, fmt(v, 0), { "text-anchor": "middle", "font-size": 10.5 }).style.fill = g <= 1 ? "#fff" : "#0b0b0b";
         x0 += v;
       });
-    }, { label: "Phase breakdown", total: (i) => i.groups.reduce((a, b) => a + b, 0), tipLabel: (i) => `${fmt(i.groups.reduce((a, b) => a + b, 0))} s` });
-    const leg = h("div", { class: "legend" });
+    }, { label: "Phase breakdown", total: (i) => i.groups.reduce((a, b) => a + b, 0) + (i.download_s || 0),
+         medianOf: (i) => i.groups.reduce((a, b) => a + b, 0),
+         tipLabel: (i) => `${fmt(i.groups.reduce((a, b) => a + b, 0))} s` + (i.download_s ? ` + ${fmt(i.download_s)} s download` : "") });
+    const leg = dlLegend(h("div", { class: "legend" }));
     G.forEach((g, i) => { const it = h("span", { class: "item" }), sw = h("span", { class: "sw" }); sw.style.background = color(i); it.append(sw, h("span", {}, g)); leg.appendChild(it); });
     host.appendChild(leg);
   }
 
   if (S.view === "savings") {
-    $("cmpSub").textContent = "Median seconds per phase group, original vs current. Graph capture is the approach; weight load moves with volume variance.";
+    $("cmpSub").textContent = "Median seconds per phase group, original vs current. Graph capture is the approach; weight load moves with volume variance. "
+      + "The first-start download (when there are runs with one) compares the vanilla way, on the GPU box, with today's CPU sandbox.";
     const [O, C] = pairGroups(all);
     const rows = G.map((g, i) => ({ g, i, o: median(O.map((x) => x.groups[i])), c: median(C.map((x) => x.groups[i])) }));
-    rows.push({ g: "Total spawn → ready", i: -1, o: median(O.map((x) => x.ready_s)), c: median(C.map((x) => x.ready_s)) });
+    const dl = downloadPair(all);
+    if (dl.o != null && dl.c != null && (dl.o || dl.c))
+      rows.unshift({ g: "Weight download (first start)", i: -2, o: dl.o, c: dl.c,
+                     note: S.mode === "two" ? "" : "vanilla: GPU box · now: CPU sandbox",
+                     cost: `${dlGpuCost(dl.o, S.mode === "two" ? dl.om : "gpu")} → ${dlGpuCost(dl.c, S.mode === "two" ? dl.cm : "cpu")} GPU` });
+    rows.push({ g: "Total spawn → ready", i: -1, o: median(O.map((x) => x.ready_s)), c: median(C.map((x) => x.ready_s)),
+                note: "typical start, weights already cached" });
+    if (dl.to != null && dl.tc != null && (dl.o || dl.c))
+      rows.push({ g: "Total incl. first-start download", i: -3, o: dl.to, c: dl.tc,
+                  note: "download + startup" });
     const W = 1200, left = 260, right = 200, rh = 16, gi = 4, go = 16, top = 8;
     const H = top + rows.length * (2 * rh + gi + go) + 24;
     const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, width: "100%", role: "img", "aria-label": "Savings by phase" }, host);
@@ -332,6 +389,7 @@ function renderCompare() {
     let y = top;
     rows.forEach((r) => {
       text(svg, left - 12, y + rh + 4, r.g, { "text-anchor": "end", class: "ink", "font-size": 12, "font-weight": r.i < 0 ? 650 : 400 });
+      if (r.note) text(svg, left - 12, y + rh + 18, r.note, { "text-anchor": "end", "font-size": 10 });
       [[r.o, ORIG(), pairNames()[0]], [r.c, CUR(), pairNames()[1]]].forEach(([v, c, n], k) => {
         const bar = roundedBar(svg, x(0), y, Math.max(x(v) - x(0), 1), rh, c, { left: false });
         hover(bar, () => [r.g, [{ value: `${fmt(v)} s`, name: `${n} (median)`, color: c }]]);
@@ -339,7 +397,9 @@ function renderCompare() {
         y += rh + gi;
       });
       const d = r.c - r.o;
-      const lab = text(svg, W - right + 70, y - rh - gi / 2 - 4, `${d <= 0 ? "−" : "+"}${fmt(Math.abs(d))} s`, { "font-weight": 650, "font-size": 13 });
+      const pct = r.o > 0 ? `${d <= 0 ? "−" : "+"}${fmt((100 * Math.abs(d)) / r.o, 0)}%` : "—";  // change relative to the first side
+      const lab = text(svg, W - right + 70, y - rh - gi / 2 - 4, pct, { "font-weight": 650, "font-size": 13 });
+      if (r.cost) text(svg, W - right + 70, y - rh - gi / 2 + 12, r.cost, { "font-size": 11.5, class: "ink" });
       lab.style.fill = d <= -1 ? css("--good-text") : css("--text-secondary");
       y += go - gi;
     });

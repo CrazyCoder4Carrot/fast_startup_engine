@@ -74,7 +74,7 @@ table.plain td:first-child { color: var(--ink); font-weight: 600; }
 table.plain tr:last-child td { border-bottom: none; }
 table.plain.nowrap td { white-space: nowrap; }
 /* evolution steps */
-.steps { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1em; margin: .6em 0 1.2em; }
+.steps { display: grid; grid-template-columns: repeat(5, 1fr); gap: 1em; margin: .6em 0 1.2em; }
 .step { border: 1px solid var(--line); border-radius: 12px; padding: 1em 1.1em; background: var(--bg);
   box-shadow: 0 4px 16px rgba(15,23,42,.04); }
 .step:last-child { border-color: var(--accent); background: var(--accent-soft); }
@@ -95,6 +95,17 @@ table.plain.nowrap td { white-space: nowrap; }
 .legend i { display: inline-block; width: .75em; height: .75em; border-radius: 3px; margin-right: .45em; vertical-align: -.05em; }
 .results h2 { margin-bottom: .4em; } .results .chart { margin-bottom: .3em; } .results .chart-title { font-size: .9em; margin-bottom: .1em; }
 .results .bar { height: 1.25em; } .results .bar-row { margin: .12em 0; } .results .seg { font-size: .68em; }
+.results .chart-title { display: none; }
+svg.savings { width: 100%; height: auto; display: block; margin: -.2em 0 .2em; font-family: inherit; }
+svg.savings .grid { stroke: var(--line); } svg.savings .tick { font-size: 11px; fill: var(--faint); text-anchor: middle; }
+svg.savings .lab { font-size: 13.5px; fill: var(--ink); text-anchor: end; font-weight: 600; } svg.savings .lab.tot { font-weight: 800; font-size: 14.5px; }
+svg.savings .fix { font-size: 11px; fill: var(--muted); text-anchor: end; }
+svg.savings .base { fill: #94a3b8; } svg.savings .now { fill: #2a78d6; }
+svg.savings .val { font-size: 11.5px; fill: var(--ink2); }
+svg.savings .delta { font-size: 14px; font-weight: 700; text-anchor: end; } svg.savings .delta.good { fill: var(--good); } svg.savings .delta.bad { fill: var(--bad); } svg.savings .delta.flat { fill: var(--muted); }
+.legend.sides { margin-left: 0; } .legend.sides i.lb { background: #94a3b8; } .legend.sides i.ln { background: #2a78d6; }
+.stage td.good { color: var(--good); font-weight: 600; } .stage td.bad { color: var(--bad); font-weight: 600; }
+.stage tr.tot td { border-top: 2px solid var(--ink); font-weight: 700; }
 .results table.compact { font-size: .78em; margin-top: .3em; } .results table.compact td, .results table.compact th { padding: .3em .6em; }
 /* code block */
 .plain-seq li { font-size: .95em; margin-bottom: .8em; }
@@ -113,6 +124,14 @@ html[data-theme="dark"] pre.code { background: #020617; }
 .bs-ex { position: absolute; top: calc(100% + 1.55em); transform: translateX(-50%); font-size: .72em; color: var(--good); font-weight: 600; white-space: nowrap; }
 .bs-ex::before { content: "▲ "; }
 .bs-axis { font-size: .72em; color: var(--faint); text-align: right; margin-right: 1.2em; padding-top: 2.6em; }
+/* prefetch diagram */
+svg.pfd { width: 100%; height: auto; display: block; font-family: inherit; }
+svg.pfd .hd { font-size: 15px; font-weight: 700; fill: #0f172a; text-anchor: middle; } svg.pfd .sub { font-size: 12px; fill: #64748b; text-anchor: middle; }
+svg.pfd .file { fill: #fde2e2; stroke: #f5b4b4; } svg.pfd .ft { font-size: 13px; fill: #0f172a; text-anchor: middle; font-family: "SF Mono", Menlo, monospace; }
+svg.pfd .thr { fill: #e8f0fd; stroke: #93b4ea; } svg.pfd .tt { font-size: 13px; fill: #1d4ed8; font-weight: 600; text-anchor: middle; }
+svg.pfd .ram { fill: #ecfdf5; stroke: #9fdcc0; } svg.pfd .pg { fill: #a7e3c9; } svg.pfd .pt { font-size: 12px; fill: #065f46; text-anchor: middle; font-family: "SF Mono", Menlo, monospace; }
+svg.pfd .ar { stroke: #64748b; stroke-width: 1.8; } svg.pfd .dots { font-size: 22px; fill: #94a3b8; text-anchor: middle; }
+svg.pfd .lb { font-size: 11.5px; fill: #64748b; text-anchor: middle; }
 /* sequence diagram */
 svg.seqd { width: 100%; height: auto; display: block; margin: -.3em 0 .4em; font-family: inherit; }
 svg.seqd .lane { stroke-width: 1; } .l-user { fill: #e8f0fd; stroke: #c9dcf8; } .l-hw { fill: #f1f5f9; stroke: #cbd5e1; }
@@ -347,7 +366,7 @@ html[data-theme="editorial"] .panel { box-shadow: none; }
   <div class="pc">
     <div><h4 class="pro">Pros</h4><ul class="pmlist pros"><li><span class="pm">+</span>Faster SGLang init: weight load 62&nbsp;→&nbsp;13&nbsp;s (30B), 564&nbsp;→&nbsp;75&nbsp;s (235B)</li></ul>
          <h4 class="con">Cons</h4><ul class="pmlist cons"><li><span class="pm">−</span>Needs a larger-memory host: about 2× the weights (235B: 940 GiB)</li></ul></div>
-    <div><div class="panel blue"><h4>Before</h4><p>SGLang reads from the volume on demand, ~1&nbsp;GB/s</p></div><div class="panel green"><h4>Now</h4><p>Parallel read into RAM during imports: ~2 GB/s median (30B), 4.2 GB/s (235B)</p></div><p class="small">The drop combines faster parallel reads and overlap with imports. The 13 s left is the RAM → GPU copy.</p></div>
+    <div><svg class="pfd" viewBox="0 0 620 362" role="img"><defs><marker id="pfa" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#64748b"/></marker></defs><text x="80" y="22" class="hd">Network volume</text><text x="80" y="40" class="sub">16 shard files</text><text x="300" y="22" class="hd">16 threads</text><text x="300" y="40" class="sub">one file each, in parallel</text><text x="530" y="22" class="hd">Page cache (RAM)</text><rect x="450" y="76" width="162" height="280" rx="10" class="ram"/><rect x="6" y="76" width="148" height="40" rx="7" class="file"/><text x="80" y="101.0" class="ft">model-00001</text><rect x="240" y="76" width="120" height="40" rx="20" class="thr"/><text x="300" y="101.0" class="tt">thread 1</text><rect x="462" y="80" width="138" height="32" rx="5" class="pg"/><text x="531" y="101.0" class="pt">model-00001</text><line x1="158" y1="96.0" x2="234" y2="96.0" class="ar" marker-end="url(#pfa)"/><line x1="364" y1="96.0" x2="456" y2="96.0" class="ar" marker-end="url(#pfa)"/><rect x="6" y="132" width="148" height="40" rx="7" class="file"/><text x="80" y="157.0" class="ft">model-00002</text><rect x="240" y="132" width="120" height="40" rx="20" class="thr"/><text x="300" y="157.0" class="tt">thread 2</text><rect x="462" y="136" width="138" height="32" rx="5" class="pg"/><text x="531" y="157.0" class="pt">model-00002</text><line x1="158" y1="152.0" x2="234" y2="152.0" class="ar" marker-end="url(#pfa)"/><line x1="364" y1="152.0" x2="456" y2="152.0" class="ar" marker-end="url(#pfa)"/><rect x="6" y="188" width="148" height="40" rx="7" class="file"/><text x="80" y="213.0" class="ft">model-00003</text><rect x="240" y="188" width="120" height="40" rx="20" class="thr"/><text x="300" y="213.0" class="tt">thread 3</text><rect x="462" y="192" width="138" height="32" rx="5" class="pg"/><text x="531" y="213.0" class="pt">model-00003</text><line x1="158" y1="208.0" x2="234" y2="208.0" class="ar" marker-end="url(#pfa)"/><line x1="364" y1="208.0" x2="456" y2="208.0" class="ar" marker-end="url(#pfa)"/><text x="80" y="269.0" class="dots">⋮</text><text x="300" y="269.0" class="dots">⋮</text><text x="531" y="269.0" class="dots">⋮</text><rect x="6" y="300" width="148" height="40" rx="7" class="file"/><text x="80" y="325.0" class="ft">model-00016</text><rect x="240" y="300" width="120" height="40" rx="20" class="thr"/><text x="300" y="325.0" class="tt">thread 16</text><rect x="462" y="304" width="138" height="32" rx="5" class="pg"/><text x="531" y="325.0" class="pt">model-00016</text><line x1="158" y1="320.0" x2="234" y2="320.0" class="ar" marker-end="url(#pfa)"/><line x1="364" y1="320.0" x2="456" y2="320.0" class="ar" marker-end="url(#pfa)"/><text x="197" y="68" class="lb">read</text><text x="410" y="68" class="lb">16 MB chunks</text></svg><p class="small">Before: SGLang reads the shards on demand, ~1&nbsp;GB/s. Now: ~2&nbsp;GB/s median (30B), 4.2&nbsp;GB/s (235B). Models with more shards: a thread takes the next file when it finishes.</p></div>
   </div>
 </section>
 <section data-label="Weights">
@@ -528,57 +547,7 @@ python -m compileall -q -j 0 /opt/sglang/lib/python3.12/site-packages /sgl-works
   </div>
   <p class="small">Qwen3-30B, full CUDA graphs. Also saves ~9 s of warmup. Reused by any start with the same SGLang version, GPU, TP and model config.</p>
 </section>
-<section data-label="GPU allocation">
-  <h2>Sized per model</h2>
-  <table class="plain">
-    <tr><th>Setting</th><th>Rule</th><th>Why</th></tr>
-    <tr><td>Host RAM</td><td>2× weights + 64 GiB</td><td>Room for the prefetched weights</td></tr>
-    <tr><td>CPUs</td><td>4 per GPU</td><td>Enough cores for TP workers and prefetch</td></tr>
-    <tr><td>Prefetch threads</td><td>2× CPUs</td><td>More threads gave no gain</td></tr>
-    <tr><td>Minimum lifetime</td><td>235B: 15 min</td><td>Engine is not stopped mid-load</td></tr>
-  </table>
-</section>
-<section data-label="GPU sharing">
-  <h2>GPU sharing: two engines on one host</h2>
-  <p class="what">Run two TP=2 engines of Qwen3-30B on one 4×H100 host.</p>
-  <div class="pc">
-    <div><h4 class="pro">Pros</h4><ul class="pmlist pros"><li><span class="pm">+</span>Weights, cache and imports prefetched once for both</li><li><span class="pm">+</span>Weight load: 49 s → 14 s</li><li><span class="pm">+</span>CUDA graphs: 68 s → 10 s</li></ul>
-         <h4 class="con">Cons</h4><ul class="pmlist cons"><li><span class="pm">−</span>Only 1.4×: both engines import at once, so imports take ~84 s</li><li><span class="pm">−</span>Only 2 trials so far</li></ul></div>
-    <div><table class="plain"><tr><th>Both ready</th><th>Vanilla</th><th>Now</th></tr><tr><td>Startup</td><td>223.9 s</td><td>155.5 s</td></tr><tr><td>GPU cost</td><td>$0.98</td><td>$0.53</td></tr></table><div class="panel blue" style="margin-top:.9em"><h4>Next</h4><p>Stagger the two launches</p></div></div>
-  </div>
-</section>
-<section data-label="Summary">
-  <h2>Before and after, by phase</h2>
-  <table class="plain">
-    <tr><th>Phase (Qwen3-30B, 2×H100)</th><th>Before</th><th>Now</th></tr>
-    <tr><td>Imports + spawn</td><td>58 s</td><td>48 s</td></tr>
-    <tr><td>NCCL init</td><td>19 s</td><td>1 s</td></tr>
-    <tr><td>Weight load</td><td>62 s</td><td>13 s</td></tr>
-    <tr><td>CUDA graphs</td><td>72 s</td><td>9 s</td></tr>
-    <tr><td>Other</td><td>19 s</td><td>8 s</td></tr>
-  </table>
-</section>
 <section class="divider" data-kicker="Make it work, then make it reliable"><div class="num">05</div><h1>Make it work, then make it reliable</h1></section>
-<section>
-  <h2>Control plane evolution</h2>
-  <div class="steps">
-    <div class="step"><div class="n">1</div><h4>Scripts</h4><p>One script per experiment.</p><p class="lim">No shared state</p></div>
-    <div class="step"><div class="n">2</div><h4>JSON file</h4><p>Catalog of cached artifacts. In-memory queue.</p><p class="lim">Restart lost running jobs</p></div>
-    <div class="step"><div class="n">3</div><h4>SQLite</h4><p>Queue in the database. API and worker split.</p><p class="lim">One machine, one writer</p></div>
-    <div class="step"><div class="n">4</div><h4>Postgres in Docker</h4><p>Concurrent workers on any host.</p><p class="lim">API and worker in containers</p></div>
-  </div>
-</section>
-<section>
-  <h2>Issues found and fixed</h2>
-  <table class="plain">
-    <tr><th>Issue</th><th>Fix</th></tr>
-    <tr><td>Service restart interrupted running jobs</td><td>Database queue; separate API and worker</td></tr>
-    <tr><td>Partial download marked complete</td><td>Verify every shard</td></tr>
-    <tr><td>235B engine stopped mid-load</td><td>Minimum lifetime per model</td></tr>
-    <tr><td>Models shared one volume</td><td>One volume per model</td></tr>
-    <tr><td>Phases timed on the fastest GPU</td><td>Time on the slowest GPU</td></tr>
-  </table>
-</section>
 <section class="arch-slide" data-label="Architecture">
   <h2>Architecture</h2>
   <div class="lane local"><h4>Local control plane</h4>
@@ -596,7 +565,7 @@ python -m compileall -q -j 0 /opt/sglang/lib/python3.12/site-packages /sgl-works
       <div class="box key wide"><b>GPU engine</b><span>at once: prefetch weights into RAM · restore compiled kernels · start SGLang</span></div>
       <div class="arr">←<small>mount</small></div>
       <div class="box"><b>Volumes</b><span>weights + compile cache, one set per model</span></div><div class="arr">←</div>
-      <div class="box"><b>CPU prep</b><span>downloads weights, no GPU billed</span></div>
+      <div class="box"><b>CPU prep</b><span>only on a weights cache miss: downloads them, no GPU billed</span></div>
     </div>
   </div>
 </section>
@@ -608,56 +577,23 @@ python -m compileall -q -j 0 /opt/sglang/lib/python3.12/site-packages /sgl-works
     <div><div class="panel blue"><h4>Queue = a Postgres table</h4><p>Workers claim the oldest queued row with <code>FOR UPDATE SKIP LOCKED</code>, so two workers never get the same job.</p></div><div class="panel green"><h4>Job states</h4><p>queued → running → serving → stopped · timeout · failed</p></div></div>
   </div>
 </section>
-<section data-label="Architecture">
-  <h2>Worker + scheduler</h2>
-  <p class="what">Claims a job, plans the start, then runs the plan.</p>
-  <div class="pc">
-    <div><h4>How it works</h4><ul class="dots"><li><b>Plan:</b> look up weights and compile cache in the catalog</li><li>Size RAM and CPUs from the checkpoint; estimate every step</li><li><b>Execute:</b> CPU prep if weights are missing, then the GPU sandbox</li><li>Heartbeat every 5 s; a job silent for 30 s is reaped</li><li>Reconciler every 30 s: drops exited engines, stops expired ones</li></ul></div>
-    <div><table class="plain"><tr><th>Plan step (30B, cache hit)</th><th>Estimate</th></tr><tr><td>Claim GPU + container</td><td>~14 s</td></tr><tr><td>Restore cache, prefetch</td><td>0 s (parallel)</td></tr><tr><td>Imports, init, load, graphs</td><td>learned per model</td></tr></table><p class="small">235B: predicted 219.5 s, actual 220.8 s.</p></div>
-  </div>
+<section class="results" data-label="Results">
+  <h2>Results: Qwen3-30B · 2×H100</h2>
+  <svg class="savings" viewBox="0 0 1000 288" role="img"><line x1="190.0" x2="190.0" y1="4" y2="270" class="grid"/><text x="190.0" y="284" class="tick">0s</text><line x1="312.7" x2="312.7" y1="4" y2="270" class="grid"/><text x="312.7" y="284" class="tick">50s</text><line x1="435.3" x2="435.3" y1="4" y2="270" class="grid"/><text x="435.3" y="284" class="tick">100s</text><line x1="558.0" x2="558.0" y1="4" y2="270" class="grid"/><text x="558.0" y="284" class="tick">150s</text><line x1="680.6" x2="680.6" y1="4" y2="270" class="grid"/><text x="680.6" y="284" class="tick">200s</text><text x="178" y="17" class="lab">Imports + spawn</text><text x="178" y="32" class="fix">bytecode, import prefetch</text><rect x="190" y="4" width="141.8" height="13" rx="3" class="base"/><text x="337.8" y="14.5" class="val">57.8 s</text><rect x="190" y="20" width="117.5" height="13" rx="3" class="now"/><text x="313.5" y="30.5" class="val">47.9 s</text><text x="998" y="20.5" class="delta good" text-anchor="end">−9.9 s (−17%)</text><text x="178" y="61" class="lab">CUDA / NCCL init</text><text x="178" y="76" class="fix">compile cache</text><rect x="190" y="48" width="47.1" height="13" rx="3" class="base"/><text x="243.1" y="58.5" class="val">19.2 s</text><rect x="190" y="64" width="2.5" height="13" rx="3" class="now"/><text x="198.5" y="74.5" class="val">1.0 s</text><text x="998" y="64.5" class="delta good" text-anchor="end">−18.2 s (−95%)</text><text x="178" y="105" class="lab">Weight load</text><text x="178" y="120" class="fix">prefetch into RAM</text><rect x="190" y="92" width="150.9" height="13" rx="3" class="base"/><text x="346.9" y="102.5" class="val">61.5 s</text><rect x="190" y="108" width="32.1" height="13" rx="3" class="now"/><text x="228.1" y="118.5" class="val">13.1 s</text><text x="998" y="108.5" class="delta good" text-anchor="end">−48.4 s (−79%)</text><text x="178" y="149" class="lab">CUDA graphs</text><text x="178" y="164" class="fix">compile cache + pow2</text><rect x="190" y="136" width="175.9" height="13" rx="3" class="base"/><text x="371.9" y="146.5" class="val">71.7 s</text><rect x="190" y="152" width="22.6" height="13" rx="3" class="now"/><text x="218.6" y="162.5" class="val">9.2 s</text><text x="998" y="152.5" class="delta good" text-anchor="end">−62.5 s (−87%)</text><text x="178" y="193" class="lab">Other (KV, warmup)</text><text x="178" y="208" class="fix">compile cache</text><rect x="190" y="180" width="45.4" height="13" rx="3" class="base"/><text x="241.4" y="190.5" class="val">18.5 s</text><rect x="190" y="196" width="19.9" height="13" rx="3" class="now"/><text x="215.9" y="206.5" class="val">8.1 s</text><text x="998" y="196.5" class="delta good" text-anchor="end">−10.4 s (−56%)</text><text x="178" y="241" class="lab tot">Startup</text><rect x="190" y="224" width="563.7" height="13" rx="3" class="base"/><text x="759.7" y="234.5" class="val">229.8 s</text><rect x="190" y="240" width="207.3" height="13" rx="3" class="now"/><text x="403.3" y="250.5" class="val">84.5 s</text><text x="998" y="240.5" class="delta good" text-anchor="end">−145.3 s (−63%)</text></svg>
+  <div class="legend sides"><span><i class="lb"></i>Baseline</span><span><i class="ln"></i>Now</span></div>
+  <p class="small">GPU cost per start $0.50 → $0.18. Medians: baseline n=3, now n=12.</p>
 </section>
-<section data-label="Architecture">
-  <h2>Catalog</h2>
-  <p class="what">What is already prepared, and how long each step takes.</p>
-  <div class="pc">
-    <div><h4>How it works</h4><ul class="dots"><li>Artifacts: weights and compile caches, each with where its copies live</li><li>A copy is marked validated once an engine served traffic with it</li><li>Engine registry: running engines, URL, lifetime</li><li>Learned timings per model, updated after every start</li></ul></div>
-    <div><table class="plain"><tr><th>Artifact</th><th>Keyed by</th></tr><tr><td>Weights</td><td>model + revision</td></tr><tr><td>Compile cache</td><td>SGLang version, GPU, TP, model config</td></tr></table></div>
-  </div>
+<section class="results" data-label="Results">
+  <h2>Results: Qwen3-235B · 8×B200</h2>
+  <svg class="savings" viewBox="0 0 1000 288" role="img"><line x1="190.0" x2="190.0" y1="4" y2="270" class="grid"/><text x="190.0" y="284" class="tick">0s</text><line x1="308.5" x2="308.5" y1="4" y2="270" class="grid"/><text x="308.5" y="284" class="tick">200s</text><line x1="427.0" x2="427.0" y1="4" y2="270" class="grid"/><text x="427.0" y="284" class="tick">400s</text><line x1="545.5" x2="545.5" y1="4" y2="270" class="grid"/><text x="545.5" y="284" class="tick">600s</text><line x1="664.0" x2="664.0" y1="4" y2="270" class="grid"/><text x="664.0" y="284" class="tick">800s</text><text x="178" y="17" class="lab">Imports + spawn</text><text x="178" y="32" class="fix">bytecode, import prefetch</text><rect x="190" y="4" width="90.2" height="13" rx="3" class="base"/><text x="286.2" y="14.5" class="val">152.2 s</text><rect x="190" y="20" width="60.4" height="13" rx="3" class="now"/><text x="256.4" y="30.5" class="val">102.0 s</text><text x="998" y="20.5" class="delta good" text-anchor="end">−50.2 s (−33%)</text><text x="178" y="61" class="lab">CUDA / NCCL init</text><text x="178" y="76" class="fix">compile cache</text><rect x="190" y="48" width="14.8" height="13" rx="3" class="base"/><text x="210.8" y="58.5" class="val">24.9 s</text><rect x="190" y="64" width="5.8" height="13" rx="3" class="now"/><text x="201.8" y="74.5" class="val">9.8 s</text><text x="998" y="64.5" class="delta good" text-anchor="end">−15.1 s (−61%)</text><text x="178" y="105" class="lab">Weight load</text><text x="178" y="120" class="fix">prefetch into RAM</text><rect x="190" y="92" width="334.4" height="13" rx="3" class="base"/><text x="530.4" y="102.5" class="val">564.4 s</text><rect x="190" y="108" width="44.4" height="13" rx="3" class="now"/><text x="240.4" y="118.5" class="val">75.0 s</text><text x="998" y="108.5" class="delta good" text-anchor="end">−489.4 s (−87%)</text><text x="178" y="149" class="lab">CUDA graphs</text><text x="178" y="164" class="fix">compile cache + pow2</text><rect x="190" y="136" width="47.2" height="13" rx="3" class="base"/><text x="243.2" y="146.5" class="val">79.7 s</text><rect x="190" y="152" width="8.2" height="13" rx="3" class="now"/><text x="204.2" y="162.5" class="val">13.9 s</text><text x="998" y="152.5" class="delta good" text-anchor="end">−65.8 s (−83%)</text><text x="178" y="193" class="lab">Other (KV, warmup)</text><text x="178" y="208" class="fix">compile cache</text><rect x="190" y="180" width="76.9" height="13" rx="3" class="base"/><text x="272.9" y="190.5" class="val">129.8 s</text><rect x="190" y="196" width="9.9" height="13" rx="3" class="now"/><text x="205.9" y="206.5" class="val">16.7 s</text><text x="998" y="196.5" class="delta good" text-anchor="end">−113.1 s (−87%)</text><text x="178" y="241" class="lab tot">Startup</text><rect x="190" y="224" width="563.7" height="13" rx="3" class="base"/><text x="759.7" y="234.5" class="val">951.5 s</text><rect x="190" y="240" width="130.8" height="13" rx="3" class="now"/><text x="326.8" y="250.5" class="val">220.8 s</text><text x="998" y="240.5" class="delta good" text-anchor="end">−730.7 s (−77%)</text></svg>
+  <div class="legend sides"><span><i class="lb"></i>Baseline</span><span><i class="ln"></i>Now</span></div>
+  <p class="small">GPU cost per start $13.22 → $3.03. n=1 on each side.</p>
 </section>
-<section data-label="Architecture">
-  <h2>CPU prep + volumes</h2>
-  <p class="what">Weights are prepared without a GPU, on per-model storage.</p>
-  <div class="pc">
-    <div><h4>How it works</h4><ul class="dots"><li>CPU prep: 8-CPU sandbox downloads from Hugging Face</li><li>Every shard in the index is checked before the weights count as ready</li><li>One weights volume and one compile-cache volume per model</li><li>Volumes are created on the first miss</li></ul></div>
-    <div><table class="plain"><tr><th>Volume</th><th>Holds</th></tr><tr><td>fes-models-&lt;model&gt;</td><td>weights</td></tr><tr><td>fes-artifacts-&lt;model&gt;</td><td>compile cache (~29 MB)</td></tr><tr><td>fes-results</td><td>trial results</td></tr></table></div>
-  </div>
-</section>
-<section data-label="Architecture">
-  <h2>GPU engine</h2>
-  <p class="what">One sandbox per start, running the engine agent.</p>
-  <div class="pc">
-    <div><h4>How it works</h4><ul class="dots"><li>At boot: records uptime, so Modal's scheduling wait is excluded</li><li>Starts weight prefetch, import prefetch, cache restore and SGLang together</li><li>One SGLang server per GPU group (e.g. 2 on 4×H100)</li><li>Reports READY with per-phase timings; writes the compile cache back on a miss</li></ul></div>
-    <div><div class="panel green"><h4>Ready</h4><p>The worker registers the engine and its tunnel URL; the Playground can prompt it.</p></div><div class="panel blue"><h4>Stop</h4><p>By the user, at its lifetime, or when the sandbox exits.</p></div></div>
-  </div>
-</section>
-<section class="results" data-label="Outcome">
-  <h2>Results</h2>
-  <div class="chart"><div class="chart-title">Qwen3-30B · 2×H100</div>
-<div class="bar-row"><div class="bar-label">Baseline</div><div class="bar"><div class="seg" style="width:25.15%;background:#2a78d6" title="Imports & process spawn: 57.8 s">58</div><div class="seg" style="width:8.36%;background:#eb6834" title="CUDA / NCCL init: 19.2 s">19</div><div class="seg" style="width:26.76%;background:#1baf7a" title="Weight load: 61.5 s">62</div><div class="seg" style="width:31.20%;background:#eda100" title="CUDA graph capture: 71.7 s">72</div><div class="seg" style="width:8.05%;background:#e87ba4" title="Other (init, KV, warmup): 18.5 s">18</div></div><div class="bar-total">229.8 s</div></div>
-<div class="bar-row"><div class="bar-label">Now</div><div class="bar"><div class="seg" style="width:20.84%;background:#2a78d6" title="Imports & process spawn: 47.9 s">48</div><div class="seg" style="width:0.44%;background:#eb6834" title="CUDA / NCCL init: 1.0 s"></div><div class="seg" style="width:5.70%;background:#1baf7a" title="Weight load: 13.1 s"></div><div class="seg" style="width:4.00%;background:#eda100" title="CUDA graph capture: 9.2 s"></div><div class="seg" style="width:3.52%;background:#e87ba4" title="Other (init, KV, warmup): 8.1 s"></div></div><div class="bar-total">84.5 s</div></div></div>
-  <div class="chart"><div class="chart-title">Qwen3-30B · 4×H100 · 2 engines</div>
-<div class="bar-row"><div class="bar-label">Baseline</div><div class="bar"><div class="seg" style="width:32.07%;background:#2a78d6" title="Imports & process spawn: 71.8 s">72</div><div class="seg" style="width:7.95%;background:#eb6834" title="CUDA / NCCL init: 17.8 s">18</div><div class="seg" style="width:21.84%;background:#1baf7a" title="Weight load: 48.9 s">49</div><div class="seg" style="width:30.33%;background:#eda100" title="CUDA graph capture: 67.9 s">68</div><div class="seg" style="width:7.77%;background:#e87ba4" title="Other (init, KV, warmup): 17.4 s">17</div></div><div class="bar-total">223.9 s</div></div>
-<div class="bar-row"><div class="bar-label">Now</div><div class="bar"><div class="seg" style="width:37.47%;background:#2a78d6" title="Imports & process spawn: 83.9 s">84</div><div class="seg" style="width:0.71%;background:#eb6834" title="CUDA / NCCL init: 1.6 s"></div><div class="seg" style="width:6.39%;background:#1baf7a" title="Weight load: 14.3 s">14</div><div class="seg" style="width:4.47%;background:#eda100" title="CUDA graph capture: 10.0 s"></div><div class="seg" style="width:4.60%;background:#e87ba4" title="Other (init, KV, warmup): 10.3 s"></div></div><div class="bar-total">155.5 s</div></div></div>
-  <div class="chart"><div class="chart-title">Qwen3-235B · 8×B200</div>
-<div class="bar-row"><div class="bar-label">Baseline</div><div class="bar"><div class="seg" style="width:16.00%;background:#2a78d6" title="Imports & process spawn: 152.2 s">152</div><div class="seg" style="width:2.62%;background:#eb6834" title="CUDA / NCCL init: 24.9 s"></div><div class="seg" style="width:59.32%;background:#1baf7a" title="Weight load: 564.4 s">564</div><div class="seg" style="width:8.38%;background:#eda100" title="CUDA graph capture: 79.7 s">80</div><div class="seg" style="width:13.64%;background:#e87ba4" title="Other (init, KV, warmup): 129.8 s">130</div></div><div class="bar-total">951.5 s</div></div>
-<div class="bar-row"><div class="bar-label">Now</div><div class="bar"><div class="seg" style="width:10.72%;background:#2a78d6" title="Imports & process spawn: 102.0 s">102</div><div class="seg" style="width:1.03%;background:#eb6834" title="CUDA / NCCL init: 9.8 s"></div><div class="seg" style="width:7.88%;background:#1baf7a" title="Weight load: 75.0 s">75</div><div class="seg" style="width:1.46%;background:#eda100" title="CUDA graph capture: 13.9 s"></div><div class="seg" style="width:1.76%;background:#e87ba4" title="Other (init, KV, warmup): 16.7 s"></div></div><div class="bar-total">220.8 s</div></div></div>
-  <div class="legend"><span><i style="background:#2a78d6"></i>Imports & process spawn</span><span><i style="background:#eb6834"></i>CUDA / NCCL init</span><span><i style="background:#1baf7a"></i>Weight load</span><span><i style="background:#eda100"></i>CUDA graph capture</span><span><i style="background:#e87ba4"></i>Other (init, KV, warmup)</span></div>
-  <table class="plain compact">
-    <tr><th>Workload</th><th>Startup</th><th>GPU cost per start</th><th>Outputs</th></tr>
-    <tr><td>Qwen3-30B · 2×H100</td><td>229.8 → <b>84.5 s</b> (2.7×)</td><td>$0.50 → <b>$0.18</b></td><td>identical</td></tr>
-    <tr><td>Qwen3-30B · 4×H100 · 2 engines</td><td>223.9 → <b>155.5 s</b> (1.4×)</td><td>$0.98 → <b>$0.53</b></td><td>identical</td></tr>
-    <tr><td>Qwen3-235B · 8×B200</td><td>951.5 → <b>220.8 s</b> (4.3×)</td><td>$13.22 → <b>$3.03</b></td><td>identical</td></tr>
-  </table>
+<section class="results" data-label="Results">
+  <h2>Results: Qwen3-30B · 2 engines on 4×H100</h2>
+  <svg class="savings" viewBox="0 0 1000 288" role="img"><line x1="190.0" x2="190.0" y1="4" y2="270" class="grid"/><text x="190.0" y="284" class="tick">0s</text><line x1="315.9" x2="315.9" y1="4" y2="270" class="grid"/><text x="315.9" y="284" class="tick">50s</text><line x1="441.8" x2="441.8" y1="4" y2="270" class="grid"/><text x="441.8" y="284" class="tick">100s</text><line x1="567.7" x2="567.7" y1="4" y2="270" class="grid"/><text x="567.7" y="284" class="tick">150s</text><line x1="693.6" x2="693.6" y1="4" y2="270" class="grid"/><text x="693.6" y="284" class="tick">200s</text><text x="178" y="17" class="lab">Imports + spawn</text><text x="178" y="32" class="fix">bytecode, import prefetch</text><rect x="190" y="4" width="180.8" height="13" rx="3" class="base"/><text x="376.8" y="14.5" class="val">71.8 s</text><rect x="190" y="20" width="211.2" height="13" rx="3" class="now"/><text x="407.2" y="30.5" class="val">83.9 s</text><text x="998" y="20.5" class="delta bad" text-anchor="end">+12.1 s (+17%)</text><text x="178" y="61" class="lab">CUDA / NCCL init</text><text x="178" y="76" class="fix">compile cache</text><rect x="190" y="48" width="44.8" height="13" rx="3" class="base"/><text x="240.8" y="58.5" class="val">17.8 s</text><rect x="190" y="64" width="4.0" height="13" rx="3" class="now"/><text x="200.0" y="74.5" class="val">1.6 s</text><text x="998" y="64.5" class="delta good" text-anchor="end">−16.2 s (−91%)</text><text x="178" y="105" class="lab">Weight load</text><text x="178" y="120" class="fix">prefetch into RAM</text><rect x="190" y="92" width="123.1" height="13" rx="3" class="base"/><text x="319.1" y="102.5" class="val">48.9 s</text><rect x="190" y="108" width="36.0" height="13" rx="3" class="now"/><text x="232.0" y="118.5" class="val">14.3 s</text><text x="998" y="108.5" class="delta good" text-anchor="end">−34.6 s (−71%)</text><text x="178" y="149" class="lab">CUDA graphs</text><text x="178" y="164" class="fix">compile cache + pow2</text><rect x="190" y="136" width="171.0" height="13" rx="3" class="base"/><text x="367.0" y="146.5" class="val">67.9 s</text><rect x="190" y="152" width="25.2" height="13" rx="3" class="now"/><text x="221.2" y="162.5" class="val">10.0 s</text><text x="998" y="152.5" class="delta good" text-anchor="end">−57.9 s (−85%)</text><text x="178" y="193" class="lab">Other (KV, warmup)</text><text x="178" y="208" class="fix">compile cache</text><rect x="190" y="180" width="43.8" height="13" rx="3" class="base"/><text x="239.8" y="190.5" class="val">17.4 s</text><rect x="190" y="196" width="25.9" height="13" rx="3" class="now"/><text x="221.9" y="206.5" class="val">10.3 s</text><text x="998" y="196.5" class="delta good" text-anchor="end">−7.1 s (−41%)</text><text x="178" y="241" class="lab tot">Startup</text><rect x="190" y="224" width="563.7" height="13" rx="3" class="base"/><text x="759.7" y="234.5" class="val">223.9 s</text><rect x="190" y="240" width="391.5" height="13" rx="3" class="now"/><text x="587.5" y="250.5" class="val">155.5 s</text><text x="998" y="240.5" class="delta good" text-anchor="end">−68.4 s (−31%)</text></svg>
+  <div class="legend sides"><span><i class="lb"></i>Baseline</span><span><i class="ln"></i>Now</span></div>
+  <p class="small">GPU cost per start $0.98 → $0.53. Baseline n=1, now n=2. Startup also includes ~35 s outside the phases: slow container starts on this 4×H100 host. Both engines are ready within 0.2 s of each other.</p>
 </section>
 <section data-label="Outlook">
   <h2>Future Work</h2>

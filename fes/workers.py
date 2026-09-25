@@ -79,12 +79,12 @@ def app() -> modal.App:
     return modal.App.lookup(APP_NAME, create_if_missing=True)
 
 
-def prepare_weights(model_id: str, on_sandbox=lambda sid: None) -> dict:
-    """CPU prep worker: make sure the weights are on the volume. Blocks until done."""
+def prepare_weights(model_id: str, on_sandbox=lambda sid: None, volume: modal.Volume | None = None) -> dict:
+    """CPU prep worker: make sure the weights are on the volume (the model's own, or `volume`). Blocks until done."""
     sb = modal.Sandbox.create(
         "python", "-c", PREP_WEIGHTS, model_id, model_path(model_id),
         app=app(), image=prep_image, cpu=8, memory=16384, timeout=2 * 60 * 60,
-        volumes={MODELS_DIR: model_volume(model_id)}, secrets=[hf_secret], tags={"role": "prep", "model": model_id},
+        volumes={MODELS_DIR: volume or model_volume(model_id)}, secrets=[hf_secret], tags={"role": "prep", "model": model_id},
     )
     on_sandbox(sb.object_id)
     try:

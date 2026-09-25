@@ -152,6 +152,7 @@ code { font: 11.5px ui-monospace, Menlo, monospace; background: var(--surface-2)
     <nav class="topnav">
       <a href="/">Engines</a>
       <a href="/jobs">Jobs</a>
+      <a href="/bench">Benchmark</a>
       <a href="/playground">Playground</a>
       <a href="/catalog">Catalog</a>
       <a href="/compare">Compare</a>
@@ -491,15 +492,26 @@ function kpi(value, unit, label, detail, good) {
   if (detail) d.appendChild(h("div", { class: "d" + (good ? " good" : "") }, detail));
   return d;
 }
+// A trial that started without weights (Benchmark page: "Download first") downloads before spawn.
+// The charts show it as its own grey segment/slice ahead of the five startup phases.
+const DL_COLOR = "#94a3b8", DL_NAME = "Weight download (before spawn)";
+const dlSeconds = (run, L) => (run.download && (!L || L.run === 1) ? run.download.wall_s : 0);
+
 function renderKpis(run, L) {
   const box = $("kpis");
   box.replaceChildren();
   const cold = run.launches[0], warm = run.launches[run.launches.length - 1];
   const gb = (L.weight_gb_per_gpu || 0) * run.tp;
   const busy = L.gpu_busy || {};
+  const d = run.download;  // set when the trial started without weights (Benchmark page: "Download first")
+  if (d && L.run === 1) box.append(
+    kpi(fmt(d.wall_s), "s", "Weight download (before spawn)",
+        `${fmt(d.bytes / 1e9, 0)} GB at ${fmt(d.bytes / 1e9 / Math.max(d.seconds, 1e-3), 2)} GB/s · `
+        + (d.mode === "gpu" ? "on the GPU box, GPUs idle and billed" : "on a CPU sandbox, no GPU billed")));
   box.append(
     kpi(fmt(L.ready_s), "s", `Spawn → first request (${L.label})`,
-        run.container_start_s != null && L.run === 1 ? `+ ${fmt(run.container_start_s)} s container start` : "reused container"),
+        run.container_start_s != null && L.run === 1
+          ? `+ ${fmt(run.container_start_s)} s container start` + (d ? ` + ${fmt(d.wall_s)} s download` : "") : "reused container"),
     kpi(fmt(L.load_s), "s", "Weight load",
         gb && L.load_s ? `${fmt(gb, 1)} GB at ${fmt(gb / L.load_s, 2)} GB/s` : ""),
     kpi(fmt(L.groups[3]), "s", "CUDA graph capture",
@@ -514,15 +526,23 @@ function renderKpis(run, L) {
 }
 
 function renderDonut(run, L) {
-  const total = L.groups.reduce((a, b) => a + b, 0);
-  $("donutSub").textContent = `Run ${L.run} (${L.label}): share of ${fmt(total)} s from spawn to first request, in five phase groups.`;
+  const dl = dlSeconds(run, L);
+  const vals = dl ? [...L.groups, dl] : L.groups;                     // index 5 = the download, when present
+  const names = dl ? [...run.groups, DL_NAME] : run.groups;
+  const colorOf = (i) => (i < run.groups.length ? color(i) : DL_COLOR);
+  const total = vals.reduce((a, b) => a + b, 0);
+  const order = vals.map((_, i) => i).sort((a, b) => vals[b] - vals[a]);  // largest first
+  $("donutSub").textContent = dl
+    ? `Run ${L.run} (${L.label}): ${fmt(total)} s from the start of the weight download to first request.`
+    : `Run ${L.run} (${L.label}): share of ${fmt(total)} s from spawn to first request, in five phase groups.`;
   mount("donut", (host) => {
     const W = 500, H = 250, cx = 125, cy = 125, R = 110, r = 70;
     const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, width: "100%", role: "img",
       "aria-label": "Donut chart of startup time by phase group" }, host);
     let a0 = -Math.PI / 2;
     const surface = css("--surface-1");
-    L.groups.forEach((v, i) => {
+    order.forEach((i) => {
+      const v = vals[i];
       if (v <= 0) return;
       const a1 = a0 + (v / total) * Math.PI * 2;
       const large = a1 - a0 > Math.PI ? 1 : 0;
@@ -530,29 +550,34 @@ function renderDonut(run, L) {
       const [x0, y0] = p(R, a0), [x1, y1] = p(R, a1), [x2, y2] = p(r, a1), [x3, y3] = p(r, a0);
       const path = el("path", {
         d: `M${x0},${y0} A${R},${R} 0 ${large} 1 ${x1},${y1} L${x2},${y2} A${r},${r} 0 ${large} 0 ${x3},${y3} Z`,
-        fill: color(i), stroke: surface, "stroke-width": 2, "stroke-linejoin": "round",
+        fill: colorOf(i), stroke: surface, "stroke-width": 2, "stroke-linejoin": "round",
       }, svg);
-      hover(path, () => [run.groups[i], [{ value: `${fmt(v)} s`, name: `${fmt((100 * v) / total, 0)}% of startup`, color: color(i) }]]);
+      hover(path, () => [names[i], [{ value: `${fmt(v)} s`, name: `${fmt((100 * v) / total, 0)}% of the total`, color: colorOf(i) }]]);
       a0 = a1;
     });
     text(svg, cx, cy - 4, `${fmt(total, 0)} s`, { "text-anchor": "middle", class: "ink", "font-size": 26, "font-weight": 650 });
     text(svg, cx, cy + 16, L.label === "cold" ? "cold start" : L.label.startsWith("group") ? `${L.label} · cold` : "warm start", { "text-anchor": "middle", class: "muted", "font-size": 12 });
     // legend doubles as direct labels: swatch, name, value, share
-    L.groups.forEach((v, i) => {
-      const y = 38 + i * 38;
-      roundedBar(svg, 262, y - 9, 10, 10, color(i), { r: 3 });
-      text(svg, 280, y, run.groups[i], { class: "ink", "font-size": 12 });
+    order.forEach((i, k) => {
+      const v = vals[i], y = 30 + k * (dl ? 34 : 38);
+      roundedBar(svg, 262, y - 9, 10, 10, colorOf(i), { r: 3 });
+      text(svg, 280, y, names[i], { class: "ink", "font-size": 12 });
       text(svg, 280, y + 16, `${fmt(v)} s · ${fmt((100 * v) / total, 0)}%`, { "font-size": 12 });
     });
   }, () => table(["Phase group", "Seconds", "Share"],
-      L.groups.map((v, i) => [run.groups[i], fmt(v), fmt((100 * v) / total, 0) + "%"]), [1, 2]));
+      order.map((i) => [names[i], fmt(vals[i]), fmt((100 * vals[i]) / total, 0) + "%"]), [1, 2]));
 }
 
 function renderCompare(run) {
-  const Ls = run.launches;
+  const Ls0 = run.launches;
+  // With a download, each launch gets a sixth value (the download; 0 for warm launches), drawn in grey.
+  const Ls = run.download ? Ls0.map((l) => ({ ...l, groups: [...l.groups, dlSeconds(run, l)] })) : Ls0;
+  const names = run.download ? [...run.groups, DL_NAME] : run.groups;
+  const colorOf = (i) => (i < run.groups.length ? color(i) : DL_COLOR);
+  const order = names.map((_, i) => i).sort((a, b) => Ls[0].groups[b] - Ls[0].groups[a]);  // by cold time, largest first
   mount("compare", (host) => {
     const W = 680, rowH = 18, gapIn = 4, gapOut = 16, left = 230, right = 56;
-    const H = 20 + run.groups.length * (Ls.length * (rowH + gapIn) + gapOut) + 20;
+    const H = 20 + names.length * (Ls.length * (rowH + gapIn) + gapOut) + 20;
     const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, width: "100%", role: "img", "aria-label": "Cold vs warm by phase group" }, host);
     const max = Math.max(...Ls.flatMap((l) => l.groups));
     const ticks = niceTicks(max, 4), xmax = ticks[ticks.length - 1];
@@ -563,14 +588,15 @@ function renderCompare(run) {
       text(svg, x(t), H - 4, `${t}s`, { "text-anchor": "middle" });
     }
     let y = 18;
-    run.groups.forEach((g, gi) => {
+    order.forEach((gi) => {
+      const g = names[gi];
       const blockH = Ls.length * (rowH + gapIn) - gapIn;
       text(svg, left - 10, y + blockH / 2 + 4, g, { "text-anchor": "end", class: "ink", "font-size": 12 });
       Ls.forEach((l, li) => {
         const v = l.groups[gi];
-        const bar = roundedBar(svg, left, y, Math.max(x(v) - left, 1), rowH, color(gi), { left: false });
+        const bar = roundedBar(svg, left, y, Math.max(x(v) - left, 1), rowH, colorOf(gi), { left: false });
         if (li > 0) bar.setAttribute("fill-opacity", 0.42);
-        hover(bar, () => [g, Ls.map((o) => ({ value: `${fmt(o.groups[gi])} s`, name: `run ${o.run} (${o.label})`, color: color(gi) }))]);
+        hover(bar, () => [g, Ls.map((o) => ({ value: `${fmt(o.groups[gi])} s`, name: `run ${o.run} (${o.label})`, color: colorOf(gi) }))]);
         text(svg, x(v) + 6, y + rowH / 2 + 4, `${fmt(v)}s`, { class: li === 0 ? "ink" : "" });
         y += rowH + gapIn;
       });
@@ -586,7 +612,7 @@ function renderCompare(run) {
     });
     host.appendChild(leg);
   }, () => table(["Phase group", ...Ls.map((l) => `Run ${l.run} (${l.label}) s`), ...(Ls.length > 1 ? ["Δ s"] : [])],
-      run.groups.map((g, i) => [g, ...Ls.map((l) => fmt(l.groups[i])),
+      order.map((i) => [names[i], ...Ls.map((l) => fmt(l.groups[i])),
         ...(Ls.length > 1 ? [fmt(Ls[0].groups[i] - Ls[Ls.length - 1].groups[i])] : [])]),
       Ls.map((_, i) => i + 1).concat(Ls.length > 1 ? [Ls.length + 1] : [])));
 }
@@ -597,7 +623,8 @@ function renderGantt(run) {
     const W = 1200, left = 120, right = 70, rowH = 26, rowGap = 22, top = 10;
     const H = top + Ls.length * (rowH + rowGap) + 26;
     const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, width: "100%", role: "img", "aria-label": "Startup timeline per launch" }, host);
-    const max = Math.max(...Ls.map((l) => l.ready_s));
+    const off = (l) => dlSeconds(run, l);                                // the cold launch starts after its download
+    const max = Math.max(...Ls.map((l) => l.ready_s + off(l)));
     const ticks = niceTicks(max, 8), xmax = ticks[ticks.length - 1];
     const x = (v) => left + (v / xmax) * (W - left - right);
     for (const t of ticks) {
@@ -607,10 +634,16 @@ function renderGantt(run) {
     Ls.forEach((l, li) => {
       const y = top + li * (rowH + rowGap) + 8;
       text(svg, left - 12, y + rowH / 2 + 4, `Run ${l.run} (${l.label})`, { "text-anchor": "end", class: "ink", "font-size": 12.5 });
-      const segs = l.segments;
+      const segs = l.segments, o = off(l);
+      if (o) {
+        const w = Math.max(x(o) - x(0) - 2, 0.8);
+        const bar = roundedBar(svg, x(0), y, w, rowH, DL_COLOR, { left: true, right: false });
+        hover(bar, () => [DL_NAME, [{ value: `${fmt(o)} s`, name: run.download.mode === "gpu" ? "on the GPU box, GPUs idle" : "on a CPU sandbox, no GPU" }]]);
+        if (w > 46) text(svg, x(0) + w / 2, y + rowH / 2 + 4, `download ${fmt(o, 0)}s`, { "text-anchor": "middle", "font-size": 11 }).style.fill = "#0b0b0b";
+      }
       segs.forEach((s, si) => {
-        const x0 = x(s.start), w = Math.max(x(s.end) - x0 - 2, 0.8);
-        const bar = roundedBar(svg, x0, y, w, rowH, color(s.group), { left: si === 0, right: si === segs.length - 1 });
+        const x0 = x(s.start + o), w = Math.max(x(s.end + o) - x0 - 2, 0.8);
+        const bar = roundedBar(svg, x0, y, w, rowH, color(s.group), { left: si === 0 && !o, right: si === segs.length - 1 });
         hover(bar, () => [s.name, [
           { value: `${fmt(s.end - s.start)} s`, name: run.groups[s.group], color: color(s.group) },
           { value: `${fmt(s.start)}–${fmt(s.end)} s`, name: "from spawn" },
@@ -619,17 +652,26 @@ function renderGantt(run) {
         if (w > 46) text(svg, x0 + w / 2, y + rowH / 2 + 4, `${fmt(s.end - s.start, 0)}s`, { "text-anchor": "middle", "font-size": 11 })
           .style.fill = s.group <= 1 ? "#ffffff" : "#0b0b0b";
       });
-      text(svg, x(l.ready_s) + 8, y + rowH / 2 + 5, `${fmt(l.ready_s)} s`, { class: "ink", "font-weight": 650, "font-size": 13 });
+      text(svg, x(l.ready_s + o) + 8, y + rowH / 2 + 5, `${fmt(l.ready_s + o)} s`,
+        { class: "ink", "font-weight": 650, "font-size": 13 });
     });
     const leg = h("div", { class: "legend" });
+    if (run.download) {
+      const it = h("span", { class: "item" }), sw = h("span", { class: "sw" });
+      sw.style.background = DL_COLOR; it.append(sw, h("span", {}, "Weight download")); leg.appendChild(it);
+    }
     run.groups.forEach((g, i) => {
       const it = h("span", { class: "item" }), sw = h("span", { class: "sw" });
       sw.style.background = color(i); it.append(sw, h("span", {}, g)); leg.appendChild(it);
     });
     host.appendChild(leg);
   }, () => table(["Launch", "Segment", "Group", "Start s", "End s", "Duration s"],
-      Ls.flatMap((l) => l.segments.map((s) => [`Run ${l.run} (${l.label})`, s.name, run.groups[s.group],
-        fmt(s.start), fmt(s.end), fmt(s.end - s.start)])), [3, 4, 5]));
+      Ls.flatMap((l) => {
+        const o = dlSeconds(run, l);
+        const rows = l.segments.map((s) => [`Run ${l.run} (${l.label})`, s.name, run.groups[s.group],
+          fmt(s.start + o), fmt(s.end + o), fmt(s.end - s.start)]);
+        return o ? [[`Run ${l.run} (${l.label})`, "download", "Weight download", fmt(0), fmt(o), fmt(o)], ...rows] : rows;
+      }), [3, 4, 5]));
 }
 
 function renderGpu(run) {

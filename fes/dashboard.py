@@ -190,6 +190,7 @@ def load_run(run_id: str) -> dict | None:
         "extra_args": " ".join(extra),
         "container_start_s": s.get("container_start_s"),
         "scheduling_wait_s": s.get("scheduling_wait_s"),
+        "download": s.get("download"),  # {mode, seconds, wall_s, bytes} when the trial started without weights
         "engine_groups": s.get("groups", 1),
         "reconstructed": s.get("reconstructed"),
         "cache_dirs": s.get("cache_dirs_after_run1", {}),
@@ -306,7 +307,7 @@ def scheduling_wait(measured: float | None, container_s: float | None) -> tuple[
 
 def _cmp_item(id_, label, side, stack, model, source, groups, ready_s, container_s, extra_pre_s=0.0,
               gpu_billed_s=None, e2e_s=None, load_s=None, graph_s=None, serving=None, corr=None, when=None,
-              sched_measured=None, prep_s=0.0, wl=None):
+              sched_measured=None, prep_s=0.0, wl=None, download_s=0.0, download_mode=None):
     """One bar in the comparison: a launch's startup (excluding Modal scheduling) and its phases."""
     g = list(groups)
     g[4] += extra_pre_s  # cache restore etc. before spawn counts as "other"
@@ -315,13 +316,16 @@ def _cmp_item(id_, label, side, stack, model, source, groups, ready_s, container
     e2e -= sched + prep_s  # startup excludes Modal scheduling and a one-time weight download
     if gpu_billed_s is not None and sched_measured is None:
         gpu_billed_s -= sched  # older records counted the wait as billed
+    if download_mode == "gpu":  # downloaded on the GPU box: the GPUs were claimed and idle meanwhile
+        gpu_billed_s = (gpu_billed_s if gpu_billed_s is not None else e2e) + download_s
     return {"id": id_, "label": label, "side": side, "stack": stack, "model": model, "source": source,
             **(wl or workload(model, "", 0)),
             "groups": [round(x, 2) for x in g], "ready_s": round(ready_s + extra_pre_s, 2),
             "container_start_s": container_s, "end_to_end_s": round(e2e, 1),
             "scheduling_wait_s": sched, "scheduling_estimated": est, "prep_excluded_s": round(prep_s, 1),
             "gpu_billed_s": round(gpu_billed_s if gpu_billed_s is not None else e2e, 1),
-            "load_s": load_s, "graph_s": graph_s, "serving": serving, "correctness_hash": corr, "when": when}
+            "load_s": load_s, "graph_s": graph_s, "serving": serving, "correctness_hash": corr, "when": when,
+            "download_s": round(download_s, 1), "download_mode": download_mode}
 
 
 BENCH_STACK = {
@@ -347,13 +351,16 @@ def compare_data() -> dict:
         seg = {x["name"]: x["end"] - x["start"] for x in l["segments"]}
         graph = seg.get("Prefill CUDA graphs", 0) + seg.get("Decode CUDA graphs", 0)
         restore = ((b.get("prep") or {}).get("cache") or {}).get("restore_s", 0.0)
+        dl = full.get("download") or {}  # started without weights: never an "original" baseline (warm page cache after it)
+        stack = ("vanilla" if a == "baseline" else BENCH_STACK[a]) + (f" + download on {dl['mode'].upper()}" if dl else "")
         items.append(_cmp_item(
-            r["run_id"], f"{a} r{b.get('rep')}", "original" if a == "baseline" else "iteration",
-            "vanilla" if a == "baseline" else BENCH_STACK[a], full.get("model") or DEFAULT_MODEL, "benchmark trial",
+            r["run_id"], f"{a} r{b.get('rep')} · {r['run_id'][4:6]}/{r['run_id'][6:8]} {r['run_id'][9:11]}:{r['run_id'][11:13]}",
+            "original" if a == "baseline" and not dl else "iteration",
+            stack, full.get("model") or DEFAULT_MODEL, "benchmark trial",
             l["groups"], l["ready_s"], full.get("container_start_s"), extra_pre_s=restore if b.get("prep", {}).get("cache") else 0.0,
             load_s=l["load_s"], graph_s=round(graph, 2), serving=b.get("serving"),
             corr=(b.get("correctness") or {}).get("hash"), when=r["run_id"][:15],
-            sched_measured=full.get("scheduling_wait_s"),
+            sched_measured=full.get("scheduling_wait_s"), download_s=dl.get("wall_s") or 0.0, download_mode=dl.get("mode"),
             wl=workload(full.get("model"), full.get("gpu", ""), full.get("gpu_count") or 1, full.get("engine_groups", 1))))
         if full.get("reconstructed"):
             items[-1]["note"] = "summary rebuilt from logs (" + full["reconstructed"] + ")"
@@ -389,7 +396,8 @@ def compare_data() -> dict:
             gpu_billed_s=a_.get("gpu_billed_to_ready_s"), e2e_s=a_.get("request_to_ready_s"),
             load_s=a_.get("load_s"), graph_s=a_.get("graph_s"), when=rec["engine_id"][:15],
             sched_measured=a_.get("scheduling_wait_s"),
-            prep_s=((a_.get("prep") or {}).get("seconds") or 0.0) if not (a_.get("prep") or {}).get("already_present", True) else 0.0,
+            prep_s=(prep_dl := ((a_.get("prep") or {}).get("seconds") or 0.0) if not (a_.get("prep") or {}).get("already_present", True) else 0.0),
+            download_s=prep_dl, download_mode="cpu" if prep_dl else None,
             wl=workload(req.get("model"), req.get("gpu", "H100!:2").split(":")[0], int(req.get("gpu", "H100!:2").split(":")[-1]), groups_n)))
     items.sort(key=lambda i: i["when"] or "")
     preds = [{"engine_id": r["engine_id"], "predicted_s": r["plan"]["predicted_ready_s"], "model": r["request"].get("model") or DEFAULT_MODEL,
@@ -432,3 +440,50 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+_IMPORT_ROW = re.compile(r"import time:\s+(\d+) \|\s+(\d+) \|( *)(\S+)")
+_MARKS = [(n, re.compile(p)) for n, p in (("server_args", r"server_args="), ("dist_begin", r"Init torch distributed begin"))]
+
+
+def proc_breakdown(log_path: str) -> dict:
+    """Split "imports + process spawn" for a `trace_imports` trial (its run log).
+
+    Uses the per-process start markers (__FESPROC__, from proc_trace/sitecustomize.py) and
+    Python's import timing (PYTHONPROFILEIMPORTTIME). Import rows are attributed by time: before
+    the first spawned worker starts they are the launcher's; after, the workers', which import in
+    parallel (so their total is divided by the number of spawned processes). Times in seconds
+    since spawn. Import timing adds a little overhead, so treat imports as a slight overestimate."""
+    procs, rows, marks = [], [], {}
+    for line in open(log_path, errors="replace"):
+        t_str, _, msg = line.strip().partition(" ")
+        try:
+            t = float(t_str)
+        except ValueError:
+            continue
+        if "__FESPROC__" in msg:
+            procs.append({"t": t, "cmd": msg.split("cmd=", 1)[-1], "spawned": "spawn_main" in msg})  # not resource_tracker
+        elif (m := _IMPORT_ROW.search(msg)):
+            rows.append((t, int(m.group(2)), len(m.group(3))))
+        for name, rx in _MARKS:
+            if name not in marks and rx.search(msg):
+                marks[name] = t
+    if not rows:
+        return {}
+    top = min(r[2] for r in rows)  # least-indented rows are top-level imports
+    spawned = [p for p in procs if p["spawned"]]
+    first_worker = min((p["t"] for p in spawned), default=float("inf"))
+    launcher_us = sum(c for t, c, ind in rows if ind == top and t < first_worker)
+    worker_us = sum(c for t, c, ind in rows if ind == top and t >= first_worker)
+    out = {"launcher_imports_s": round(launcher_us / 1e6, 1),
+           "launcher_other_s": round(marks.get("server_args", 0) - launcher_us / 1e6, 1),
+           "spawned_processes": len(spawned)}
+    if spawned:
+        per_worker = worker_us / 1e6 / len(spawned)
+        out.update({
+            "launcher_to_first_worker_s": round(first_worker - marks.get("server_args", 0), 1),
+            "worker_start_spread_s": round(max(p["t"] for p in spawned) - first_worker, 1),
+            "worker_imports_s": round(per_worker, 1),
+            "worker_setup_s": round(marks.get("dist_begin", 0) - first_worker - per_worker, 1),
+        })
+    return out
